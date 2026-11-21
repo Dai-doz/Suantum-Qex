@@ -1,21 +1,72 @@
-ui_print "==========================================";
-ui_print " ██████╗ ██████╗  ██████╗ ███████╗ ██████╗ ";
-ui_print " ██╔══██╗██╔══██╗██╔═══██╗╚══███╔╝██╔════╝ ";
-ui_print " ██████╔╝██║  ██║██║   ██║  ███╔╝ ██║  ███╗";
-ui_print " ██╔═══╝ ██║  ██║██║   ██║ ███╔╝  ██║   ██║";
-ui_print " ██║     ██████╔╝╚██████╔╝███████╗╚██████╔╝";
-ui_print " ╚═╝     ╚═════╝  ╚═════╝ ╚══════╝ ╚═════╝ ";
-ui_print "==========================================";
+# Before: ui_print("  Hi! ");
+# Now:    ui_print " Hi! "
+#-----------Dynamic Installer Configs-----------#
+#The #MAGISK tag is required, dont remove it
+#MAGISK
+setdefault   magisk_support       on
+setdefault   ensure_rw            on
+setdefault   import_addons        off
+setdefault   apex_mount           off
+setdefault   overwrite_symlinks   off
+setdefault   devices              off
+setdefault   devices_alert        on
+setdefault   dalvik_memory        800M
+setdefault   extraction_speed     4M
+setdefault   off_readonly         ""
+setdefault   permissions          "0:0:0755:0644"
+#-----------------------------------------------#
+#Your script starts here:
+ui_print " "
+ui_print "=========================================="
+ui_print " ██████╗ ██████╗  ██████╗ ███████╗ ██████╗ "
+ui_print " ██╔══██╗██╔══██╗██╔═══██╗╚══███╔╝██╔════╝ "
+ui_print " ██████╔╝██║  ██║██║   ██║  ███╔╝ ██║  ███╗"
+ui_print " ██╔═══╝ ██║  ██║██║   ██║ ███╔╝  ██║   ██║"
+ui_print " ██║     ██████╔╝╚██████╔╝███████╗╚██████╔╝"
+ui_print " ╚═╝     ╚═════╝  ╚═════╝ ╚══════╝ ╚═════╝ "
+ui_print "=========================================="
+ui_print " "
 
+ui_print " "
+ui_print "[--------------------------------------------------]"
+ui_print "[                                                  ]"
+ui_print "[                  FLASHING ROM                    ]"
+ui_print "[           ProjectDozG Tool+ Paradigm             ]"
+ui_print "[              Package-key:Unauthor                ]"
+ui_print "[                                                  ]"
+ui_print "[--------------------------------------------------]"
+ui_print " "
 
-# ── 3. Flash super.img ────────────────────────────────────────────────────────
-ui_print("Flashing ROM...");
-package_extract_file("super.img", "/dev/block/by-name/super");
-set_progress(0.950000);
+# =================================================
+# 1. SUPER
+# =================================================
+ui_print "[1/1] Flashing ProjectDozG..."
+update_zip -tmp /sdcard super.img $(find_block super)
+if [ $? -eq 0 ]; then
+	ui_print " Succeed "
+else
+	ui_print " Fail! "
+fi
 
-ui_print(" ");
-ui_print("============================================");
-ui_print("  ProjectDozG Unofficial Flashed Successfully!");
-ui_print("  Please reboot your phone and flash kernel manually.");
-ui_print("============================================");
-ui_print(" ");
+# =================================================
+# 2. CLEANUP
+# =================================================
+ui_print "Cleaning temporary traces..."
+package_extract_file cleanup.sh /tmp/cleanup.sh
+set_perm 0 0 0755 /tmp/cleanup.sh
+run_program "/tmp/cleanup.sh"
+if [ $? -eq 0 ]; then
+	ui_print " Succeed "
+else
+	ui_print " Fail! "
+fi
+
+ui_print " "
+ui_print "#####################################################"
+ui_print "#                                                   #"
+ui_print "#         ProjectDozG INSTALLATION COMPLETE         #"
+ui_print "#                                                   #"
+ui_print "#####################################################"
+ui_print " "
+ui_print ">>> Reboot and feel the pain of the bug."
+ui_print " "
