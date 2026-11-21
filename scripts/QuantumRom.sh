@@ -16,6 +16,7 @@ export omc_decoder="$QT_DIR/bin/java/omc-decoder.jar"
 export mkfs_erofs="$QT_DIR/bin/erofs-utils/mkfs.erofs"
 export extract_erofs="$QT_DIR/bin/erofs-utils/extract.erofs"
 export imgextractor_py="$QT_DIR/bin/py_scripts/imgextractor.py"
+export sdat2img_py="$QT_DIR/bin/py_scripts/sdat2img.py"
 
 chmod +x "$lpmake"
 chmod +x "$lpunpack"
@@ -269,6 +270,84 @@ DETECT_FILESYSTEM() {
 }
 
 
+EXTRACT_NEW_DAT() {
+    echo " "
+
+    if [ "$#" -ne 1 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <FIRMWARE_DIRECTORY>"
+        return 1
+    fi
+
+    local FIRM_DIR="$1"
+    local found=0
+
+    # Every <name>.new.dat / .new.dat.br / split .new.dat.1 .2 ... becomes <name>.img
+    local -a names=()
+    local f base
+    for f in "$FIRM_DIR"/*.new.dat "$FIRM_DIR"/*.new.dat.br "$FIRM_DIR"/*.new.dat.1 "$FIRM_DIR"/*.new.dat.br.1; do
+        [ -e "$f" ] || continue
+        base="$(basename "$f")"
+        base="${base%%.new.dat*}"
+        [[ " ${names[*]} " == *" $base "* ]] || names+=("$base")
+    done
+
+    [ "${#names[@]}" -eq 0 ] && return 0
+
+    echo -e "Converting *.new.dat(.br) to img."
+
+    local name dat list img part
+    for name in "${names[@]}"; do
+        found=1
+        dat="$FIRM_DIR/${name}.new.dat"
+        list="$FIRM_DIR/${name}.transfer.list"
+        img="$FIRM_DIR/${name}.img"
+
+        if [ ! -f "$list" ]; then
+            echo "- ${name}.transfer.list not found, skipping $name"
+            continue
+        fi
+
+        # Split archives: name.new.dat.br.1, .2 ... or name.new.dat.1, .2 ...
+        if [ ! -f "$dat" ] && [ ! -f "${dat}.br" ]; then
+            if ls "${dat}.br".[0-9]* >/dev/null 2>&1; then
+                echo "- Joining split ${name}.new.dat.br parts"
+                cat $(ls "${dat}.br".[0-9]* | sort -t. -k1,1V) > "${dat}.br"
+                rm -f "${dat}.br".[0-9]*
+            elif ls "${dat}".[0-9]* >/dev/null 2>&1; then
+                echo "- Joining split ${name}.new.dat parts"
+                cat $(ls "${dat}".[0-9]* | sort -V) > "$dat"
+                rm -f "${dat}".[0-9]*
+            fi
+        fi
+
+        if [ -f "${dat}.br" ]; then
+            echo "- Decompressing ${name}.new.dat.br"
+            if ! brotli -d -f "${dat}.br" -o "$dat"; then
+                echo "- Failed to decompress ${name}.new.dat.br"
+                rm -f "$dat"
+                continue
+            fi
+            rm -f "${dat}.br"
+        fi
+
+        if [ ! -f "$dat" ]; then
+            echo "- ${name}.new.dat not found, skipping $name"
+            continue
+        fi
+
+        echo "- Building ${name}.img"
+        if python3 "$sdat2img_py" "$list" "$dat" "$img"; then
+            rm -f "$dat" "$list" "$FIRM_DIR/${name}.patch.dat"
+        else
+            echo "- Failed to build ${name}.img"
+            rm -f "$img"
+        fi
+    done
+
+    [ "$found" -eq 1 ] && echo -e "- new.dat conversion complete"
+}
+
+
 EXTRACT_FIRMWARE() {
     echo " "
 
@@ -395,6 +474,9 @@ EXTRACT_FIRMWARE() {
 
         rm -f "$file"
     done
+
+    # ---- system.new.dat(.br) + transfer.list ----
+    EXTRACT_NEW_DAT "$FIRM_DIR"
 
     echo -e "Firmware extraction complete."
 }
