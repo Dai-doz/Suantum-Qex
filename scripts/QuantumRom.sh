@@ -140,7 +140,7 @@ DOWNLOAD_FIRMWARE() {
 	find "$DOWN_DIR" -type f -name "*.zip.enc*" -delete
 
     # Show Firmware Info
-    local file_size=$(du -m "${DOWN_DIR}/${VERSION}.zip" 2>/dev/null | awk '{print $1}')
+    local file_size=$(du -m "${DOWN_DIR}/${VERSION_FILE}.zip" 2>/dev/null | awk '{print $1}')
     echo -e "Firmware Size: ${file_size} MB"
 }
 
@@ -601,9 +601,7 @@ DISABLE_FDE() {
         if [ -f "$i" ]; then
             echo -e "- Disabling full-disk encryption (FDE) for /data..."
             echo -e "- Found $i."
-            md5=$(md5 "$i")
             sed -i -e 's/^\([^#].*\)forceencrypt=[^,]*\(.*\)$/# &\n\1encryptable\2/g' "$i"
-            file_changed "$i" "$md5"
         fi
     done
 }
@@ -717,24 +715,32 @@ REPLACE_SMALI_METHOD() {
     echo -e "Patching: $FILE"
     echo -e "- Method: $METHOD_NAME"
 
-    if ! grep -Fq "$METHOD_NAME" "$FILE"; then
+    if [ ! -f "$FILE" ]; then
+        echo -e "- Warning- File not found: $FILE"
+        return 0
+    fi
+
+    # Full signature (name + args + return type) is the last token of the .method line
+    local SIG="${METHOD_NAME##* }"
+
+    if ! grep -Fq "$SIG" "$FILE"; then
         echo -e "- Warning- Method: $METHOD_NAME not found in: $FILE"
         return 0
     fi
 
-    # Extract method key (safe match)
-    local METHOD_KEY=$(echo "$METHOD_NAME" | sed -E 's/.* ([^ ]+\().*/\1/')
-
-    sed -i "
-/^[[:space:]]*\.method.*$METHOD_KEY/,/^[[:space:]]*\.end method/{
-    /^[[:space:]]*\.method/{
-        p
-        r /dev/stdin
-        d
-    }
-    /^[[:space:]]*\.end method/p
-    d
-}" "$FILE" <<< "$NEW_BODY"
+    awk -v sig="$SIG" -v body="$NEW_BODY" '
+        skip {
+            if ($0 ~ /^[[:space:]]*\.end method/) { skip = 0; print }
+            next
+        }
+        /^[[:space:]]*\.method/ && $NF == sig {
+            print
+            print body
+            skip = 1
+            next
+        }
+        { print }
+    ' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
 }
 
 
@@ -750,7 +756,9 @@ PATCH_FLAG_SECURE() {
     # https://forum.xda-developers.com/t/mods-samsung-not-android-mods-collection-exynos.3772017/post-86811691
 	# https://xdaforums.com/t/module-smalipatcherex-1-2-2.4627905/
 
-    local FILE_1 FILE_2 FILE_3
+    local FILE_1 FILE_2 FILE_3 FILE_4
+    local METHOD_NAME_1 METHOD_NAME_2 METHOD_NAME_3 METHOD_NAME_4
+    unset FILE_1 FILE_2 FILE_3 FILE_4
 
     local REPLACE_BODY_1='
     .locals 1
@@ -799,14 +807,14 @@ PATCH_FLAG_SECURE() {
 	case "$ANDROID_VERSION" in
 	    10)
             FILE_3="${WORK_DIR}/smali/com/android/server/devicepolicy/DevicePolicyManagerService.smali"
-	        METHOD_NAME_1=".method public getScreenCaptureDisabled(Landroid/content/ComponentName;I)Z"
+	        METHOD_NAME_3=".method public getScreenCaptureDisabled(Landroid/content/ComponentName;I)Z"
             ;;
         11)
             FILE_1="${WORK_DIR}/smali_classes2/com/android/server/wm/WindowState.smali"
             METHOD_NAME_1=".method isSecureLocked()Z"
             ;;
         12)
-            FILE_1="${WORK_DIR2}/smali_classes3/com/android/server/wm/WindowState.smali"
+            FILE_1="${WORK_DIR}/smali_classes3/com/android/server/wm/WindowState.smali"
             METHOD_NAME_1=".method isSecureLocked()Z"
             ;;
         13)
@@ -1019,12 +1027,9 @@ PATCH_SEC_SETTINGS() {
     rm -rf "$WORK_TMP"
     mkdir -p "$WORK_TMP" "$FW_DIR"
 
-    cleanup_settings() {
-        rm -rf "$WORK_TMP"
-    }
-    trap cleanup_settings RETURN
 
     echo "- Found extracted SecSettings.apk: $INPUT_APK"
+    _RUN_APKTOOL_QT if -p "$FW_DIR" -t "$TAG" "${EXTRACTED_FIRM_DIR}/system/system/framework/framework-res.apk" >/dev/null 2>&1 || true
     echo "[-] Decoding SecSettings..."
     _RUN_APKTOOL_QT d -f -p "$FW_DIR" -t "$TAG" -o "$WORK_TMP/d" "$INPUT_APK"
 
@@ -1314,6 +1319,7 @@ with open(filepath, "w", encoding="utf-8") as f:
     _SIGN_APK_QT "$OUT_APK"
     cp -f "$OUT_APK" "$INPUT_APK"
 
+    rm -rf "$WORK_TMP"
     echo "[-] Done patching extracted SecSettings.apk: $INPUT_APK"
 }
 
@@ -1375,12 +1381,9 @@ PATCH_SEC_SETUPWIZARD() {
     rm -rf "$WORK_TMP"
     mkdir -p "$WORK_TMP" "$FW_DIR"
 
-    cleanup_suw() {
-        rm -rf "$WORK_TMP"
-    }
-    trap cleanup_suw RETURN
 
     echo "- Found extracted SetupWizard APK: $INPUT_APK"
+    _RUN_APKTOOL_QT if -p "$FW_DIR" -t "$TAG" "${EXTRACTED_FIRM_DIR}/system/system/framework/framework-res.apk" >/dev/null 2>&1 || true
     echo "Decoding SetupWizard..."
     _RUN_APKTOOL_QT d -f -p "$FW_DIR" -t "$TAG" -o "$WORK_TMP/d" "$INPUT_APK"
 
@@ -1479,11 +1482,9 @@ with open(target_file, "w", encoding="utf-8") as tf:
     echo "Applying SetupWizard patches..."
     local SETUPWIZARD_APK="$WORK_TMP/d"
 
-    set +e
     NAV_STEP_FILE="$(find "$SETUPWIZARD_APK" -type f -name '*.smali' \
         -exec grep -lF '"navigationbar_setting"' {} + 2>/dev/null \
-        | grep -v '/com/sec/android/app/SecSetupWizard/SecSetupWizardActivity.smali$' | sed -n '1p')"
-    set -e
+        | grep -v '/com/sec/android/app/SecSetupWizard/SecSetupWizardActivity.smali$' | sed -n '1p')" || true
 
     if [ -n "${NAV_STEP_FILE:-}" ]; then
         NAV_STEP_METHOD="$(awk '/^\.method/{method=$0} /"navigationbar_setting"/{print method; exit}' "$NAV_STEP_FILE" \
@@ -1562,10 +1563,8 @@ with open(filepath, "w", encoding="utf-8") as f:
             DISCLAIMER_STRING_ID="$(sed -n 's/.*name="disclaimer_unica_description" id="\(0x[0-9a-fA-F]*\)".*/\1/p' "$SETUPWIZARD_PUBLIC")"
         fi
 
-        set +e
         DISCLAIMER_STEP_FILE="$(find "$SETUPWIZARD_APK" -type f -name '*.smali' \
-            -exec grep -lF '"disclaimer"' {} + 2>/dev/null | sed -n '1p')"
-        set -e
+            -exec grep -lF '"disclaimer"' {} + 2>/dev/null | sed -n '1p')" || true
 
         if [ -n "${DISCLAIMER_STEP_FILE:-}" ]; then
             DISCLAIMER_STEP_METHOD="$(awk '/^\.method/{method=$0} /"disclaimer"/{print method; exit}' \
@@ -1648,6 +1647,7 @@ with open(filepath, "w", encoding="utf-8") as f:
     _SIGN_APK_QT "$OUT_APK"
     cp -f "$OUT_APK" "$INPUT_APK"
 
+    rm -rf "$WORK_TMP"
     echo "Done patching extracted SetupWizard APK: $INPUT_APK"
 }
 
@@ -1694,38 +1694,66 @@ PATCH_APK_SHARED_USER_ID_VERIFICATION() {
 PATCH_KNOX_GUARD() {
     echo " "
 
-	if [ "$#" -ne 1 ]; then
+    if [ "$#" -ne 1 ]; then
         echo -e "Usage: ${FUNCNAME[0]} <EXTRACTED_SERVICES_DIRECTORY>"
         return 1
     fi
 
-    echo -e "Patching knox guard."
-	# patch .method public constructor <init>(Landroid/content/Context;)V
+    local SERVICES_DIR="$1"
+    local METHOD_NAME_1=".method public constructor <init>(Landroid/content/Context;)V"
 
-    local FILE="${1}/smali_classes2/com/samsung/android/knoxguard/service/KnoxGuardSeService.smali"
-	local METHOD_NAME_1=".method public constructor <init>(Landroid/content/Context;)V"
+    local REPLACE_BODY_SE='
+    .registers 2
 
-	local REPLACE_BODY_1='
-    .locals 0
- 
-	invoke-direct {p0}, Lcom/samsung/android/knoxguard/IKnoxGuardManager$Stub;-><init>()V
- 
-    const/4 p1, 0x0
- 
-    iput-object p1, p0, Lcom/samsung/android/knoxguard/service/KnoxGuardSeService;->mConnectivityManagerService:Landroid/net/ConnectivityManager;
- 
+    invoke-direct {p0}, Lcom/samsung/android/knoxguard/IKnoxGuardManager$Stub;-><init>()V
+
     new-instance p0, Ljava/lang/UnsupportedOperationException;
- 
-    const-string p1, "KnoxGuard is disabled"
- 
+
+    const-string p1, "KnoxGuard is unsupported"
 
     invoke-direct {p0, p1}, Ljava/lang/UnsupportedOperationException;-><init>(Ljava/lang/String;)V
 
     throw p0
     '
 
-    REPLACE_SMALI_METHOD "$FILE" "$METHOD_NAME_1" "$REPLACE_BODY_1"
-	rm -rf "$FIRM_DIR/$TARGET_DEVICE/system/system/priv-app/KnoxGuard"
+    local REPLACE_BODY_30='
+    .locals 17
+
+    invoke-direct/range {p0 .. p0}, Lcom/samsung/android/knoxguard/IKnoxGuardManager$Stub;-><init>()V
+
+    return-void
+
+    sput-object p1, Lcom/samsung/android/knoxguard30/service/KnoxGuard30Service;->mContext:Landroid/content/Context;
+    '
+
+    echo -e "Patching knox guard."
+
+    if [ ! -d "$SERVICES_DIR" ]; then
+        echo "- Directory not found: $SERVICES_DIR"
+        return 1
+    fi
+
+    local KG_SE_FILE
+    KG_SE_FILE="$(find "$SERVICES_DIR" -type f -name 'KnoxGuardSeService.smali' | sed -n '1p')"
+    if [ -n "${KG_SE_FILE:-}" ] && [ -f "$KG_SE_FILE" ]; then
+        REPLACE_SMALI_METHOD "$KG_SE_FILE" "$METHOD_NAME_1" "$REPLACE_BODY_SE"
+    else
+        echo "- Notice: KnoxGuardSeService.smali not found in $SERVICES_DIR"
+    fi
+
+    local KG_30_FILE
+    KG_30_FILE="$(find "$SERVICES_DIR" -type f -name 'KnoxGuard30Service.smali' | sed -n '1p')"
+    if [ -n "${KG_30_FILE:-}" ] && [ -f "$KG_30_FILE" ]; then
+        REPLACE_SMALI_METHOD "$KG_30_FILE" "$METHOD_NAME_1" "$REPLACE_BODY_30"
+    else
+        echo "- Notice: KnoxGuard30Service.smali not found in $SERVICES_DIR"
+    fi
+
+    if [ -n "${FIRM_DIR:-}" ] && [ -n "${TARGET_DEVICE:-}" ] && [ -d "$FIRM_DIR/$TARGET_DEVICE/system/system/priv-app/KnoxGuard" ]; then
+        rm -rf "$FIRM_DIR/$TARGET_DEVICE/system/system/priv-app/KnoxGuard"
+    elif [ -n "${FIRM_DIR:-}" ] && [ -d "${FIRM_DIR}/system/system/priv-app/KnoxGuard" ]; then
+        rm -rf "${FIRM_DIR}/system/system/priv-app/KnoxGuard"
+    fi
 }
 
 
@@ -2824,6 +2852,7 @@ APPLY_STOCK_CONFIG() {
 		local STOCK_DEVICE_CPU_ABILIST="$(grep -m1 '^STOCK_DEVICE_CPU_ABILIST=' "${DEVICES_DIR}/$STOCK_DEVICE/config" | cut -d= -f2 | tr -d '\r')"
 		local STOCK_DEVICE_CHIPSET="$(grep -m1 '^STOCK_DEVICE_CHIPSET=' "${DEVICES_DIR}/$STOCK_DEVICE/config" | cut -d= -f2 | tr -d '\r')"
 		local USE_ALT_SDHMS_APP="$(grep -m1 '^USE_ALT_SDHMS_APP=' "${DEVICES_DIR}/$STOCK_DEVICE/config" | cut -d= -f2 | tr -d '\r')"
+		local STOCK_DEVICE_TYPE="$(grep -m1 '^STOCK_DEVICE_TYPE=' "${DEVICES_DIR}/$STOCK_DEVICE/config" | cut -d= -f2 | tr -d '\r')"
 		local STOCK_HAS_ESIM_SUPPORT="$(grep -m1 '^STOCK_HAS_ESIM_SUPPORT=' "${DEVICES_DIR}/$STOCK_DEVICE/config" | cut -d= -f2 | tr -d '\r')"
 	    local SDHMS_MAX_SUPPORTED_OS_SDK="$(grep -m1 '^SDHMS_MAX_SUPPORTED_OS_SDK=' "${DEVICES_DIR}/$STOCK_DEVICE/config" | cut -d= -f2 | tr -d '\r')"
 		export STOCK_DVFS_FILENAME="$(grep -m1 '^STOCK_DVFS_FILENAME=' "${DEVICES_DIR}/$STOCK_DEVICE/config" | cut -d= -f2 | tr -d '\r')"
@@ -2847,7 +2876,11 @@ APPLY_STOCK_CONFIG() {
 
     # Remove ESIM files if stock device does not support.
     if [ "$STOCK_HAS_ESIM_SUPPORT" = "FALSE" ]; then
-        REMOVE_ESIM_FILES "$EXTRACTED_FIRM_DIR"
+        if declare -F REMOVE_ESIM_FILES >/dev/null 2>&1; then
+            REMOVE_ESIM_FILES "$EXTRACTED_FIRM_DIR"
+        else
+            echo "- Warning: REMOVE_ESIM_FILES is not defined, skipping eSIM cleanup."
+        fi
     fi
 
 	# ADJUST SYSTEM_EXT PARTITION.
@@ -3376,7 +3409,7 @@ APPLY_CUSTOM_FEATURES() {
 	BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.product.locale" "en-US"
     BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "fw.max_users" "5"
     BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "fw.show_multiuserui" "1"
-    BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "wifi.interface=" "wlan0"
+    BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "wifi.interface" "wlan0"
     BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "wlan.wfd.hdcp" "disable"
 	BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.telephony.sim_slots.count" "2"
 	BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.surface_flinger.protected_contents" "true"
@@ -3394,8 +3427,8 @@ APPLY_CUSTOM_FEATURES() {
         mkdir -p "${EXTRACTED_FIRM_DIR}/system/system/etc/security"
         mkdir -p "${EXTRACTED_FIRM_DIR}/system/system/etc/init/hw"
         cp -rfa "$(pwd)/OTA/system/." "${EXTRACTED_FIRM_DIR}/system/system/"
-        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "lineage.updater.uri" "https://raw.githubusercontent.com/Dai-doz/Suantum-Qex/UG-Suantum-Qex/platform/{$STOCK_DEVICE}/{$STOCK_DEVICE}.json"
-        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.lineage.device" "{$STOCK_DEVICE}"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "lineage.updater.uri" "https://raw.githubusercontent.com/Dai-doz/Suantum-Qex/UG-Suantum-Qex/platform/${STOCK_DEVICE}/${STOCK_DEVICE}.json"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.lineage.device" "${STOCK_DEVICE}"
         BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.lineage.build.version" "3.5.3"
         BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.lineage.releasetype" "Official"
 

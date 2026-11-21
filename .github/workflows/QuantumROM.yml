@@ -79,19 +79,21 @@ on:
 
       SETTINGS_MOD:
         description: "Patch SecSettings to have exclusive features [Allow settings mod features Sixteen QRP2 only]"
-        default: 'True'
+        required: true
         type: choice
         options:
-          - True
-          - False
+          - "True"
+          - "False"
+        default: "True"
 
       PATCH_LIBS:
         description: "Patch libs for 64bit only ROM [Convert 64 to 32/64]"
-        default: 'False'
+        required: true
         type: choice
         options:
-          - True
-          - False
+          - "True"
+          - "False"
+        default: "True"
 
       ADD_CHINA_SMART_MANAGER:
         description: "Add china smart manager (True/False)"
@@ -113,6 +115,15 @@ on:
 
       ADD_CUSTOM_FEATURES:
         description: "Add samsung custom features (True/False)"
+        required: true
+        type: choice
+        options:
+          - "True"
+          - "False"
+        default: "True"
+
+      PATCH_KNOX_GUARD:
+        description: "Patch Samsung KnoxGuard / 3010 (True/False)"
         required: true
         type: choice
         options:
@@ -166,7 +177,6 @@ jobs:
       - name: Checkout repository.
         uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 1
 
       - name: Set variables
@@ -194,6 +204,7 @@ jobs:
           echo "ADD_CUSTOM_FEATURES=${{ inputs.ADD_CUSTOM_FEATURES }}" | tee -a "$GITHUB_ENV"
           echo "PATCH_FLAG_SECURE=${{ inputs.PATCH_FLAG_SECURE }}" | tee -a "$GITHUB_ENV"
           echo "PATCH_SECURE_FOLDER=${{ inputs.PATCH_SECURE_FOLDER }}" | tee -a "$GITHUB_ENV"
+          echo "PATCH_KNOX_GUARD=${{ inputs.PATCH_KNOX_GUARD }}" | tee -a "$GITHUB_ENV"
           echo "PATCH_BLUETOOTH_LIBRARY=${{ inputs.PATCH_BLUETOOTH_LIBRARY }}" | tee -a "$GITHUB_ENV"
 
           echo "OUTPUT_FILESYSTEM=${{ inputs.OUTPUT_FILESYSTEM }}" | tee -a "$GITHUB_ENV"
@@ -232,21 +243,20 @@ jobs:
         if: steps.disk.outputs.enough == 'false'
         uses: rokibhasansagar/slimhub_actions@v25.42.5
 
-      - name: Download firmware ▶️ ${{ inputs.TARGET_DEVICE }} - ${{ inputs.TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK }}
-        run: |
-          source "$(pwd)/scripts/QuantumRom.sh"
-          DOWNLOAD_FIRMWARE "$TARGET_DEVICE" "$TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK" "$FIRM_DIR" "$TARGET_FW_VERSION"
-
       - name: Install Dependencies.
         run: |
           sudo apt update
           sudo apt install -y p7zip-full lz4 liblz4-1 liblz4-dev libzstd1 libzstd-dev build-essential android-sdk-libsparse-utils linux-modules-extra-$(uname -r) \
-              f2fs-tools fuse2fs fuse e2fsprogs python3 python3-pip zipalign unzip openjdk-21-jdk jq perl xxd kmod erofs-utils curl wget curl wget brotli pv
+              f2fs-tools fuse2fs fuse e2fsprogs python3 python3-pip zipalign unzip openjdk-21-jdk jq perl xxd kmod erofs-utils curl wget brotli pv bc
           sudo modprobe f2fs || true
-          git clone https://github.com/SN-Abdullah-Al-Noman/GoFileDownloader.git
-          cd GoFileDownloader
-          pip install -r requirements.txt
+          [ -d GoFileDownloader ] || git clone https://github.com/SN-Abdullah-Al-Noman/GoFileDownloader.git
+          pip install -r GoFileDownloader/requirements.txt
           mkdir -p "$FIRM_DIR" "$OUT_DIR" "$WORK_DIR"
+
+      - name: Download firmware ▶️ ${{ inputs.TARGET_DEVICE }} - ${{ inputs.TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK }}
+        run: |
+          source "$(pwd)/scripts/QuantumRom.sh"
+          DOWNLOAD_FIRMWARE "$TARGET_DEVICE" "$TARGET_DEVICE_CSC_OR_DOWNLOAD_LINK" "$FIRM_DIR" "$TARGET_FW_VERSION"
 
       - name: Extract firmware
         run: |
@@ -345,15 +355,17 @@ jobs:
 
       - name: Patch SecSettings and SecSetupWizard - ${{ inputs.SETTINGS_MOD }} / ${{ inputs.ADD_CUSTOM_FEATURES }}
         run: |
-          source "$(pwd)/scripts/QuantumRom.sh"
+         source "$(pwd)/scripts/QuantumRom.sh"
 
-          if [ "$SETTINGS_MOD" = "True" ]; then
-              PATCH_SEC_SETTINGS "$FIRM_DIR"
-          fi
+         if [ "$SETTINGS_MOD" = "True" ]; then
+           declare -F PATCH_SEC_SETTINGS >/dev/null || { echo "::error::PATCH_SEC_SETTINGS missing in scripts/QuantumRom.sh"; exit 1; }
+           PATCH_SEC_SETTINGS "$FIRM_DIR"
+         fi
 
-          if [ "$ADD_CUSTOM_FEATURES" = "True" ]; then
-              PATCH_SEC_SETUPWIZARD "$FIRM_DIR"
-          fi
+         if [ "$ADD_CUSTOM_FEATURES" = "True" ]; then
+           declare -F PATCH_SEC_SETUPWIZARD >/dev/null || { echo "::error::PATCH_SEC_SETUPWIZARD missing in scripts/QuantumRom.sh"; exit 1; }
+           PATCH_SEC_SETUPWIZARD "$FIRM_DIR"
+         fi
 
       - name: Patch flag secure and secure folder - ${{ inputs.PATCH_FLAG_SECURE }} - ${{ inputs.PATCH_SECURE_FOLDER }}
         run: |
@@ -370,6 +382,10 @@ jobs:
 
           if [ "$PATCH_SECURE_FOLDER" = "True" ]; then
               PATCH_SECURE_FOLDER "$FIRM_DIR" "$WORK_DIR/services"
+          fi
+
+          if [ "$PATCH_KNOX_GUARD" = "True" ]; then
+              PATCH_KNOX_GUARD "$WORK_DIR/services"
           fi
 
           if [ "$ADD_CHINA_SMART_MANAGER" = "True" ] || [ "$ADD_SAMSUNG_FLAGSHIP_APPS" = "True" ]; then
