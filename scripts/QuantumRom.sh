@@ -3875,3 +3875,156 @@ BUILD_SUPER_IMG() {
         $IMAGES \
         --output "$OUTPUT_IMG"
 }
+
+
+APPLY_SMALI_PATCH() {
+    if [ "$#" -ne 2 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <DECOMPILED_DIR> <PATCH_FILE>"
+        return 1
+    fi
+
+    local TARGET_DIR="$1"
+    local PATCH_FILE="$2"
+
+    if [ ! -d "$TARGET_DIR" ]; then
+        echo "- Directory not found: $TARGET_DIR"
+        return 1
+    fi
+
+    if [ ! -f "$PATCH_FILE" ]; then
+        echo "- Patch not found: $PATCH_FILE"
+        return 1
+    fi
+
+    # All-or-nothing: check first so a mismatching firmware never gets half patched.
+    if ! patch -p1 -d "$TARGET_DIR" --forward --dry-run -s < "$PATCH_FILE" >/dev/null 2>&1; then
+        echo "- Patch does not apply cleanly to this firmware, skipping: $(basename "$PATCH_FILE")"
+        patch -p1 -d "$TARGET_DIR" --forward --dry-run < "$PATCH_FILE" 2>&1 | grep -iE 'FAILED|can.t find|Reversed' | head -n 10
+        return 1
+    fi
+
+    patch -p1 -d "$TARGET_DIR" --forward --no-backup-if-mismatch -s < "$PATCH_FILE"
+}
+
+
+# Prints "yes" only for Android SDK 37.0 firmware (ro.build.version.sdk_full)
+IS_SIDE_FP_SUPPORTED() {
+    local SDK_FULL
+    SDK_FULL="$(GET_PROP "$1" "system" "ro.build.version.sdk_full")"
+
+    if [ "$SDK_FULL" = "37.0" ]; then
+        return 0
+    fi
+
+    echo "- Side fingerprint patch only targets ro.build.version.sdk_full=37.0 (found: '${SDK_FULL:-unset}'). Skipping."
+    return 1
+}
+
+
+# services.jar must already be decompiled (done by the workflow); the workflow recompiles it afterwards.
+PATCH_SIDE_FINGERPRINT_SERVICES() {
+    echo " "
+
+    if [ "$#" -ne 2 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <EXTRACTED_FIRM_DIR> <EXTRACTED_SERVICES_DIRECTORY>"
+        return 1
+    fi
+
+    local EXTRACTED_FIRM_DIR="$1"
+    local SERVICES_DIR="$2"
+
+    echo -e "Patching side fingerprint (services.jar)."
+    IS_SIDE_FP_SUPPORTED "$EXTRACTED_FIRM_DIR" || return 0
+
+    APPLY_SMALI_PATCH "$SERVICES_DIR" "${QT_DIR}/QuantumROM/Mods/fingerprint/services.patch" || return 0
+    echo "- services.jar side fingerprint patch applied."
+}
+
+
+# Decodes an apk/jar, applies one patch, rebuilds, signs (apk only) and replaces the original.
+_PATCH_SIDE_FP_PACKAGE() {
+    local FILE="$1"
+    local PATCH_FILE="$2"
+    local FRAMEWORK_RES="$3"
+
+    local FW_DIR="${QT_DIR}/bin/java/apktool/framework"
+    local TAG="ONEUI"
+    local BASE_WORK="${WORK_DIR:-${QT_DIR}/work}"
+    local NAME="$(basename "$FILE")"
+    local WORK_TMP="${BASE_WORK}/sidefp_${NAME%.*}"
+    local EXT="${NAME##*.}"
+    local OUT_FILE="${WORK_TMP}/patched.${EXT}"
+
+    if [ ! -f "$FILE" ]; then
+        echo "- Not found, skipping: $FILE"
+        return 0
+    fi
+
+    rm -rf "$WORK_TMP"
+    mkdir -p "$WORK_TMP" "$FW_DIR"
+
+    _RUN_APKTOOL_QT if -p "$FW_DIR" -t "$TAG" "$FRAMEWORK_RES" >/dev/null 2>&1 || true
+
+    echo "- Decoding $NAME"
+    if ! _RUN_APKTOOL_QT d -f -p "$FW_DIR" -t "$TAG" -o "$WORK_TMP/d" "$FILE" >/dev/null 2>&1; then
+        echo "- Failed to decode $NAME, skipping."
+        rm -rf "$WORK_TMP"
+        return 0
+    fi
+
+    if ! APPLY_SMALI_PATCH "$WORK_TMP/d" "$PATCH_FILE"; then
+        rm -rf "$WORK_TMP"
+        return 0
+    fi
+
+    echo "- Rebuilding $NAME"
+    if ! _RUN_APKTOOL_QT b -p "$FW_DIR" -o "$OUT_FILE" "$WORK_TMP/d" >/dev/null 2>&1; then
+        echo "- Failed to rebuild $NAME, keeping original."
+        rm -rf "$WORK_TMP"
+        return 0
+    fi
+
+    if [ "$EXT" = "apk" ]; then
+        _SIGN_APK_QT "$OUT_FILE" || { echo "- Failed to sign $NAME, keeping original."; rm -rf "$WORK_TMP"; return 0; }
+    fi
+
+    cp -f "$OUT_FILE" "$FILE"
+    rm -rf "$WORK_TMP"
+    echo "- Patched $NAME"
+}
+
+
+PATCH_SIDE_FINGERPRINT() {
+    echo " "
+
+    if [ "$#" -ne 1 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <EXTRACTED_FIRM_DIR>"
+        return 1
+    fi
+
+    local EXTRACTED_FIRM_DIR="$1"
+    local PATCH_DIR="${QT_DIR}/QuantumROM/Mods/fingerprint"
+    local SYS="${EXTRACTED_FIRM_DIR}/system/system"
+
+    echo -e "Patching side fingerprint (framework, SystemUI, SecSettings)."
+    IS_SIDE_FP_SUPPORTED "$EXTRACTED_FIRM_DIR" || return 0
+
+    # framework.jar has no resources, reuse the same decompile/recompile flow as services.jar.
+    if [ -f "${SYS}/framework/framework.jar" ]; then
+        echo "- Patching framework.jar"
+        DECOMPILE "$APKTOOL" "${SYS}/framework" "${SYS}/framework/framework.jar" "$WORK_DIR" >/dev/null 2>&1
+        if APPLY_SMALI_PATCH "$WORK_DIR/framework" "${PATCH_DIR}/framework.patch"; then
+            RECOMPILE "$APKTOOL" "${SYS}/framework" "$WORK_DIR/framework" "$WORK_DIR" >/dev/null 2>&1 \
+                && [ -f "$WORK_DIR/framework.jar" ] \
+                && mv -f "$WORK_DIR/framework.jar" "${SYS}/framework/framework.jar" \
+                && echo "- Patched framework.jar" \
+                || echo "- Failed to rebuild framework.jar, keeping original."
+        fi
+        rm -rf "$WORK_DIR/framework"
+    else
+        echo "- framework.jar not found, skipping."
+    fi
+
+    _PATCH_SIDE_FP_PACKAGE "${SYS}/priv-app/SystemUI/SystemUI.apk" "${PATCH_DIR}/systemui.patch" "${SYS}/framework/framework-res.apk"
+    _PATCH_SIDE_FP_PACKAGE "${SYS}/priv-app/SecSettings/SecSettings.apk" "${PATCH_DIR}/settings.patch" "${SYS}/framework/framework-res.apk"
+}

@@ -149,6 +149,15 @@ on:
           - "False"
         default: "True"
 
+      PATCH_SIDE_FINGERPRINT:
+        description: "Add side fingerprint sensor support (only runs on SDK 37.0 firmware, skipped otherwise)"
+        required: true
+        type: choice
+        options:
+          - "True"
+          - "False"
+        default: "True"
+
       PATCH_BLUETOOTH_LIBRARY:
         description: "Patch bluetooth library (True/False)"
         required: true
@@ -206,6 +215,7 @@ jobs:
           echo "PATCH_SECURE_FOLDER=${{ inputs.PATCH_SECURE_FOLDER }}" | tee -a "$GITHUB_ENV"
           echo "PATCH_KNOX_GUARD=${{ inputs.PATCH_KNOX_GUARD }}" | tee -a "$GITHUB_ENV"
           echo "PATCH_BLUETOOTH_LIBRARY=${{ inputs.PATCH_BLUETOOTH_LIBRARY }}" | tee -a "$GITHUB_ENV"
+          echo "PATCH_SIDE_FINGERPRINT=${{ inputs.PATCH_SIDE_FINGERPRINT }}" | tee -a "$GITHUB_ENV"
 
           echo "OUTPUT_FILESYSTEM=${{ inputs.OUTPUT_FILESYSTEM }}" | tee -a "$GITHUB_ENV"
           echo "COMPRESS_IMG=${{ inputs.COMPRESS_IMG }}" | tee -a "$GITHUB_ENV"
@@ -377,7 +387,7 @@ jobs:
         run: |
           source "$(pwd)/scripts/QuantumRom.sh"
 
-          if [ "$PATCH_FLAG_SECURE" = "True" ] || [ "$PATCH_SECURE_FOLDER" = "True" ] || [ "$ADD_CHINA_SMART_MANAGER" = "True" ] || [ "$ADD_SAMSUNG_FLAGSHIP_APPS" = "True" ]; then
+          if [ "$PATCH_FLAG_SECURE" = "True" ] || [ "$PATCH_SECURE_FOLDER" = "True" ] || [ "$PATCH_KNOX_GUARD" = "True" ] || [ "$PATCH_SIDE_FINGERPRINT" = "True" ] || [ "$ADD_CHINA_SMART_MANAGER" = "True" ] || [ "$ADD_SAMSUNG_FLAGSHIP_APPS" = "True" ]; then
               INSTALL_FRAMEWORK "$APKTOOL" "$FIRM_DIR/system/system/framework/framework-res.apk"
               DECOMPILE "$APKTOOL" "$FIRM_DIR/system/system/framework" "$FIRM_DIR/system/system/framework/services.jar" "$WORK_DIR"
           fi
@@ -398,9 +408,26 @@ jobs:
               PATCH_APK_SHARED_USER_ID_VERIFICATION "$FIRM_DIR" "$WORK_DIR/services"
           fi
 
+          if [ "$PATCH_SIDE_FINGERPRINT" = "True" ]; then
+              PATCH_SIDE_FINGERPRINT_SERVICES "$FIRM_DIR" "$WORK_DIR/services"
+          fi
+
+          # services.jar was decompiled above but never rebuilt, so none of the patches reached the ROM.
+          if [ -d "$WORK_DIR/services" ]; then
+              RECOMPILE "$APKTOOL" "$FIRM_DIR/system/system/framework" "$WORK_DIR/services" "$WORK_DIR"
+          fi
+
           if [ -f "$WORK_DIR/services.jar" ]; then
               mv -f "$WORK_DIR/services.jar" "$FIRM_DIR/system/system/framework/"
               echo "✅ services.jar moved to rom."
+          fi
+
+      - name: Patch side fingerprint (framework / SystemUI / SecSettings) - ${{ inputs.PATCH_SIDE_FINGERPRINT }}
+        run: |
+          source "$(pwd)/scripts/QuantumRom.sh"
+
+          if [ "$PATCH_SIDE_FINGERPRINT" = "True" ]; then
+              PATCH_SIDE_FINGERPRINT "$FIRM_DIR"
           fi
 
       - name: Patch bluetooth library- ${{ inputs.PATCH_BLUETOOTH_LIBRARY }}
