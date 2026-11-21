@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="artisanrom_about_description">ProjectDozG is a work-in-progress custom firmware for Samsung Galaxy devices.
+
+It\'s based on the latest and greatest iteration of Samsung\'s UX and it also includes additional features and tweaks to ensure the best possible experience out of the box.
+
+It is based on the UN1CA build system which allows automatic downloading/extraction of the firmware, applying the required patches and generating a flashable zip package for the specified target device.
+
+ProjectDozG supports devices using the Exynos and memetek family SoC
+
+Thanks for used our ROM, any suggestions, update for ProjectDozG will be welcome.
+
+&#160;</string>
+
+    <string name="maintainer_1_name">Dai-doz</string>
+    <string name="maintainer_1_role">Lead Developer / Exynos850 Maintainer</string>
+    <string name="maintainer_1_github">Dai-doz</string>
+    <string name="maintainer_1_avatar">Dai-doz</string>
+    
+    <string name="maintainer_2_name">LucasTheLarper</string>
+    <string name="maintainer_2_role">G80 Maintainer / Developer / Lead Admin</string>
+    <string name="maintainer_2_github">foxkhang26200</string>
+    <string name="maintainer_2_avatar">LucasTheLarper</string>
+    
+    <string name="maintainer_3_name">HuyG</string>
+    <string name="maintainer_3_role">Tester</string>
+    <string name="maintainer_3_github">Huy-TranGz</string>
+    <string name="maintainer_3_avatar">HuyG</string>
+    
+    <string name="maintainer_4_name">Hannah</string>
+    <string name="maintainer_4_role">Tester</string>
+    <string name="maintainer_4_github"></string>
+    <string name="maintainer_4_avatar">Hannah</string>
+</resources>

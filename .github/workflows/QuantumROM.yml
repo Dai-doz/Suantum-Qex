@@ -10,70 +10,12 @@ on:
         type: choice
         options:
           - SM-A055F
-          - SM-A057F
+          - SM-N985F
           - SM-A065F
-          - SM-A066B
-          - SM-A127F
-          - SM-A135F
-          - SM-A135F_8.5
-          - SM-A137F
-          - SM-A146M
-          - SM-A155F
-          - SM-A156E
-          - SM-A165F
-          - SM-A175F
-          - SM-A176B
           - SM-A225F
-          - SM-A225M
-          - SM-A226B
-          - SM-A235F
-          - SM-A236E
-          - SM-A245F
-          - SM-A256E
-          - SM-A266B
-          - SM-A315F
-          - SM-A325F
-          - SM-A336E
-          - SM-A346E
-          - SM-A356E
-          - SM-A366B
-          - SM-A415F
-          - SM-A426B
-          - SM-A515F
-          - SM-A525F
-          - SM-A528B
-          - SM-A536B
-          - SM-A546E
-          - SM-A556E
-          - SM-A715F
-          - SM-A725F
-          - SM-A736B
-          - SM-E225F
-          - SM-E346B
-          - SM-G780F
-          - SM-G780G
-          - SM-G781B
-          - SM-G990E
-          - SM-M136B
-          - SM-M146B
-          - SM-M156B
-          - SM-M166P
-          - SM-M176B
-          - SM-M215G
-          - SM-M225F
-          - SM-M325F
-          - SM-M346B
-          - SM-M356B
-          - SM-M366B
-          - SM-M556B
-          - SM-M558B
-          - SM-M566B
-          - SM-P613
-          - SM-S901B
-          - SM-S901E
-          - SM-S911B
+          - SM-A127F
           - None
-        default: "SM-A225F"
+        default: "SM-A127F"
 
       USE_UI_8_TETHERING_APEX:
         description: "Set True if your kernel BPF version is 5.4 (lower than 5.10)."
@@ -134,6 +76,22 @@ on:
           - "True"
           - "False"
         default: "True"
+
+      SETTINGS_MOD:
+        description: "Patch SecSettings to have exclusive features [Allow settings mod features Sixteen QRP2 only]"
+        default: 'True'
+        type: choice
+        options:
+          - True
+          - False
+
+      PATCH_LIBS:
+        description: "Patch libs for 64bit only ROM [Convert 64 to 32/64]"
+        default: 'False'
+        type: choice
+        options:
+          - True
+          - False
 
       ADD_CHINA_SMART_MANAGER:
         description: "Add china smart manager (True/False)"
@@ -229,6 +187,8 @@ jobs:
           echo "DEBLOAT_SAMSUNG_BIXBY=${{ inputs.DEBLOAT_SAMSUNG_BIXBY }}" | tee -a "$GITHUB_ENV"
           echo "DEBLOAT_SAMSUNG_DEX=${{ inputs.DEBLOAT_SAMSUNG_DEX }}" | tee -a "$GITHUB_ENV"
           echo "USE_UI_8_TETHERING_APEX=${{ inputs.USE_UI_8_TETHERING_APEX }}" | tee -a "$GITHUB_ENV"
+          echo "SETTINGS_MOD=${{ inputs.SETTINGS_MOD }}" | tee -a "$GITHUB_ENV"
+          echo "PATCH_LIBS=${{ inputs.PATCH_LIBS }}" | tee -a "$GITHUB_ENV"
           echo "ADD_CHINA_SMART_MANAGER=${{ inputs.ADD_CHINA_SMART_MANAGER }}" | tee -a "$GITHUB_ENV"
           echo "ADD_SAMSUNG_FLAGSHIP_APPS=${{ inputs.ADD_SAMSUNG_FLAGSHIP_APPS }}" | tee -a "$GITHUB_ENV"
           echo "ADD_CUSTOM_FEATURES=${{ inputs.ADD_CUSTOM_FEATURES }}" | tee -a "$GITHUB_ENV"
@@ -336,6 +296,14 @@ jobs:
               DEBLOAT_SAMSUNG_DEX_APPS "$FIRM_DIR"
           fi
 
+      - name: Patch 32-Bit HALs - ${{ inputs.PATCH_LIBS }}
+        run: |
+          source "$(pwd)/scripts/QuantumRom.sh"
+
+          if [ "$PATCH_LIBS" = "True" ]; then
+              PATCH_32BIT_HALS "$FIRM_DIR"
+          fi
+
       - name: Apply stock device configuration
         run: |
           source "$(pwd)/scripts/debloat.sh"
@@ -373,6 +341,18 @@ jobs:
 
           if [ "$ADD_CUSTOM_FEATURES" = "True" ]; then
               APPLY_CUSTOM_FEATURES "$FIRM_DIR"
+          fi
+
+      - name: Patch SecSettings and SecSetupWizard - ${{ inputs.SETTINGS_MOD }} / ${{ inputs.ADD_CUSTOM_FEATURES }}
+        run: |
+          source "$(pwd)/scripts/QuantumRom.sh"
+
+          if [ "$SETTINGS_MOD" = "True" ]; then
+              PATCH_SEC_SETTINGS "$FIRM_DIR"
+          fi
+
+          if [ "$ADD_CUSTOM_FEATURES" = "True" ]; then
+              PATCH_SEC_SETUPWIZARD "$FIRM_DIR"
           fi
 
       - name: Patch flag secure and secure folder - ${{ inputs.PATCH_FLAG_SECURE }} - ${{ inputs.PATCH_SECURE_FOLDER }}

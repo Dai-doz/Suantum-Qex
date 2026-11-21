@@ -1,0 +1,3 @@
+/one_ui_version/i
+    <PreferenceScreen android:layout="@layout/logo" android:key="od_logo" />
+    <Preference android:title="@string/rom_name" android:key="rom_name" android:summary="@string/rom_name_details" style="?android:preferenceInformationStyle" />

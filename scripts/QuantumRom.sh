@@ -933,6 +933,723 @@ PATCH_PRIVATE_SHARE() {
 	REPLACE_SMALI_METHOD "$FILE" "$METHOD_NAME" "$REPLACE_BODY"
 }
 
+_RUN_APKTOOL_QT() {
+    local APKTOOL_JAR="${QT_DIR}/bin/java/apktool.jar"
+    if [ -f "$APKTOOL_JAR" ]; then
+        java -jar "$APKTOOL_JAR" "$@"
+    elif [ -n "${CUSTOM_APKTOOL:-}" ]; then
+        if [[ "$CUSTOM_APKTOOL" == *.jar ]]; then
+            java -jar "$CUSTOM_APKTOOL" "$@"
+        else
+            "$CUSTOM_APKTOOL" "$@"
+        fi
+    else
+        echo "! Error: apktool.jar not found at $APKTOOL_JAR"
+        return 1
+    fi
+}
+
+_SIGN_APK_QT() {
+    local APK_PATH="$1"
+    local SIGNAPK_JAR="${QT_DIR}/bin/signapk/signapk.jar"
+    local SIGNAPK_BIN="${QT_DIR}/bin/signapk/signapk"
+    local CERT_PEM="${QT_DIR}/security/aosp_platform.x509.pem"
+    local KEY_PK8="${QT_DIR}/security/aosp_platform.pk8"
+    local SIGNED_TMP="${APK_PATH}.signed.tmp"
+
+    if [ ! -f "$CERT_PEM" ] || [ ! -f "$KEY_PK8" ]; then
+        echo "! Warning: Signing keys not found (${CERT_PEM} / ${KEY_PK8}), skipping sign."
+        return 0
+    fi
+
+    if [ -x "$SIGNAPK_BIN" ] || [ -f "$SIGNAPK_BIN" ]; then
+        "$SIGNAPK_BIN" "$CERT_PEM" "$KEY_PK8" "$APK_PATH" "$SIGNED_TMP"
+        mv -f "$SIGNED_TMP" "$APK_PATH"
+    elif [ -f "$SIGNAPK_JAR" ]; then
+        java -jar "$SIGNAPK_JAR" "$CERT_PEM" "$KEY_PK8" "$APK_PATH" "$SIGNED_TMP"
+        mv -f "$SIGNED_TMP" "$APK_PATH"
+    else
+        echo "! Warning: signapk not found at $SIGNAPK_BIN or $SIGNAPK_JAR, skipping sign."
+    fi
+}
+
+PATCH_SEC_SETTINGS() {
+    echo " "
+    echo -e "Patch 32-Bit / SecSettings"
+    echo -e "Processing..."
+
+    if [ "$#" -ne 1 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <EXTRACTED_FIRM_DIR>"
+        return 1
+    fi
+
+    local EXTRACTED_FIRM_DIR="$1"
+    local SDK_FULL
+    SDK_FULL="$(GET_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.build.version.sdk_full")"
+
+    if [ "$SDK_FULL" != "36.1" ]; then
+        echo -e "- SecSettings patch only targets ro.build.version.sdk_full=36.1 (found: '${SDK_FULL:-unset}'). Skipping."
+        return 0
+    fi
+
+    local TARGET_DIR="${EXTRACTED_FIRM_DIR}/system/system/priv-app/SecSettings"
+    local INPUT_APK="${TARGET_DIR}/SecSettings.apk"
+    local MOD_DIR="${QT_DIR}/QuantumROM/Mods/settings/SecSettings.apk"
+    local APKTOOL_JAR="${QT_DIR}/bin/java/apktool.jar"
+    local FW_DIR="${QT_DIR}/bin/java/apktool/framework"
+    local SIGNAPK_JAR="${QT_DIR}/bin/signapk/signapk.jar"
+    local SIGNAPK_BIN="${QT_DIR}/bin/signapk/signapk"
+    local CERT_PEM="${QT_DIR}/security/aosp_platform.x509.pem"
+    local KEY_PK8="${QT_DIR}/security/aosp_platform.pk8"
+    local TAG="ONEUI"
+    local BASE_WORK="${WORK_DIR:-${QT_DIR}/work}"
+    local WORK_TMP="${BASE_WORK}/secsettings_tmp"
+    local OUT_APK="${WORK_TMP}/SecSettings_patched.apk"
+
+    if [ ! -f "$INPUT_APK" ]; then
+        echo -e "! Warning: SecSettings.apk not found at $INPUT_APK. Skipping."
+        return 0
+    fi
+
+    if [ ! -d "$MOD_DIR" ]; then
+        echo -e "! Warning: Settings mod directory not found at $MOD_DIR. Skipping."
+        return 0
+    fi
+
+    rm -rf "$WORK_TMP"
+    mkdir -p "$WORK_TMP" "$FW_DIR"
+
+    cleanup_settings() {
+        rm -rf "$WORK_TMP"
+    }
+    trap cleanup_settings RETURN
+
+    echo "- Found extracted SecSettings.apk: $INPUT_APK"
+    echo "[-] Decoding SecSettings..."
+    _RUN_APKTOOL_QT d -f -p "$FW_DIR" -t "$TAG" -o "$WORK_TMP/d" "$INPUT_APK"
+
+    [ -d "$MOD_DIR/smali_classes4" ] && {
+        mkdir -p "$WORK_TMP/d/smali_classes4"
+        cp -a "$MOD_DIR/smali_classes4/." "$WORK_TMP/d/smali_classes4/"
+    }
+
+    for d in layout drawable drawable-nodpi; do
+        [ -d "$MOD_DIR/res/$d" ] && {
+            mkdir -p "$WORK_TMP/d/res/$d"
+            cp -a "$MOD_DIR/res/$d/." "$WORK_TMP/d/res/$d/"
+        }
+    done
+
+    for xml_file in unica_top_settings.xml unica_extra_settings.xml unica_ui_settings.xml artisanrom_about_settings.xml unica_spoof_settings.xml; do
+        if [ -f "$MOD_DIR/res/xml/$xml_file" ]; then
+            mkdir -p "$WORK_TMP/d/res/xml"
+            cp "$MOD_DIR/res/xml/$xml_file" "$WORK_TMP/d/res/xml/"
+        fi
+    done
+
+    if [ -f "$MOD_DIR/AndroidManifest.xml" ]; then
+        tail -n +2 "$MOD_DIR/AndroidManifest.xml" > "$WORK_TMP/manifest_snippet"
+        sed -i '/<\/application>/{
+            r '"$WORK_TMP/manifest_snippet"'
+            a\<\/application>
+            d
+        }' "$WORK_TMP/d/AndroidManifest.xml"
+    fi
+
+    if [ -f "$MOD_DIR/res/xml/sec_top_level_settings.xml" ] && [ -f "$WORK_TMP/d/res/xml/sec_top_level_settings.xml" ]; then
+        sed -i '/TopLevelAdvancedFeatures/{
+            r '"$MOD_DIR/res/xml/sec_top_level_settings.xml"'
+        }' "$WORK_TMP/d/res/xml/sec_top_level_settings.xml"
+    fi
+
+    if [ -f "$MOD_DIR/res/xml/sec_software_info_settings.xml" ]; then
+        for target in sec_software_info.xml sec_about_device_software_info.xml software_info.xml; do
+            if [ -f "$WORK_TMP/d/res/xml/$target" ]; then
+                sed -i '/one_ui_version/{
+                    r '"$MOD_DIR/res/xml/sec_software_info_settings.xml"'
+                }' "$WORK_TMP/d/res/xml/$target"
+                break
+            fi
+        done
+    fi
+
+    for f in "$MOD_DIR"/res/values/*.xml; do
+        [ -f "$f" ] || continue
+        n=$(basename "$f")
+        if [ -f "$WORK_TMP/d/res/values/$n" ]; then
+            sed -e '/?xml/d' -e '/<\/\?resources>/d' "$f" > "$WORK_TMP/e_$n"
+            sed -i '/<\/resources>/{
+                r '"$WORK_TMP/e_$n"'
+                a\</resources>
+                d
+            }' "$WORK_TMP/d/res/values/$n"
+        else
+            mkdir -p "$WORK_TMP/d/res/values"
+            cp "$f" "$WORK_TMP/d/res/values/$n"
+        fi
+    done
+
+    for dir in "$MOD_DIR"/res/values-*; do
+        [ ! -d "$dir" ] && continue
+        loc=$(basename "$dir")
+        [ ! -f "$WORK_TMP/d/res/$loc/strings.xml" ] && continue
+        sed -e '/?xml/d' -e '/<\/\?resources>/d' "$dir/strings.xml" > "$WORK_TMP/e_$loc"
+        sed -i '/<\/resources>/{
+            r '"$WORK_TMP/e_$loc"'
+            a\</resources>
+            d
+        }' "$WORK_TMP/d/res/$loc/strings.xml"
+    done
+
+    [ -d "$MOD_DIR/smali" ] && { mkdir -p "$WORK_TMP/d/smali"; cp -a "$MOD_DIR/smali/." "$WORK_TMP/d/smali/"; }
+    [ -d "$MOD_DIR/smali_classes2" ] && { mkdir -p "$WORK_TMP/d/smali_classes2"; cp -a "$MOD_DIR/smali_classes2/." "$WORK_TMP/d/smali_classes2/"; }
+    [ -d "$MOD_DIR/smali_classes5" ] && { mkdir -p "$WORK_TMP/d/smali_classes5"; cp -a "$MOD_DIR/smali_classes5/." "$WORK_TMP/d/smali_classes5/"; }
+
+    echo "[-] [SecSettings] Applying SecOutDoorModePreferenceController dynamic patch..."
+    OUTDOOR_CTRL="$(find "$WORK_TMP/d" -type f -name 'SecOutDoorModePreferenceController.smali' | sed -n '1p')"
+    if [ -n "${OUTDOOR_CTRL:-}" ]; then
+        python3 -c '
+import re, sys
+filepath = sys.argv[1]
+with open(filepath, "r", encoding="utf-8") as f:
+    content = f.read()
+pattern = re.compile(r"(\.method\s+(?:[^ \n]+\s+)*isAvailable\(\)Z.*?\.end method)", re.DOTALL)
+def replacement(match):
+    header_match = re.search(r"(\.method\s+[^ \n]+(?: [^ \n]+)*\s+isAvailable\(\)Z)", match.group(1))
+    header = header_match.group(1) if header_match else ".method public isAvailable()Z"
+    return f"""{header}
+    .registers 1
+
+    const/4 v0, 0x1
+
+    return v0
+.end method"""
+new_content, count = pattern.subn(replacement, content)
+if count > 0:
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(new_content)
+' "$OUTDOOR_CTRL"
+    fi
+
+    echo "[-] Applying DexModePreferenceController dynamic patch..."
+    DEX_CONTROLLER="$(find "$WORK_TMP/d" -type f -name 'DexModePreferenceController.smali' | sed -n '1p')"
+    if [ -n "${DEX_CONTROLLER:-}" ]; then
+        python3 -c '
+import re, sys
+filepath = sys.argv[1]
+with open(filepath, "r", encoding="utf-8") as f:
+    content = f.read()
+pattern = re.compile(r"(\.method\s+(?:[^ \n]+\s+)*getAvailabilityStatus\(\)I.*?\.end method)", re.DOTALL)
+def replacement(match):
+    header_match = re.search(r"(\.method\s+[^ \n]+(?: [^ \n]+)*\s+getAvailabilityStatus\(\)I)", match.group(1))
+    header = header_match.group(1) if header_match else ".method public getAvailabilityStatus()I"
+    return f"""{header}
+    .registers 1
+
+    const/4 v0, 0x0
+
+    return v0
+.end method"""
+new_content, count = pattern.subn(replacement, content)
+if count > 0:
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(new_content)
+' "$DEX_CONTROLLER"
+    fi
+
+    MOD_SOFTWARE_XML="$MOD_DIR/res/xml/sec_software_info_settings.xml"
+    if [ -f "$MOD_SOFTWARE_XML" ]; then
+        target_xml=""
+        for candidate in sec_software_info_settings.xml sec_software_info.xml sec_about_device_software_info.xml software_info.xml; do
+            if [ -f "$WORK_TMP/d/res/xml/$candidate" ]; then
+                target_xml="$WORK_TMP/d/res/xml/$candidate"
+                break
+            fi
+        done
+
+        if [ -n "$target_xml" ]; then
+            python3 -c '
+import re, sys
+target_file, mod_file = sys.argv[1], sys.argv[2]
+with open(target_file, "r", encoding="utf-8", errors="ignore") as tf:
+    target_content = tf.read()
+with open(mod_file, "r", encoding="utf-8", errors="ignore") as mf:
+    mod_content = mf.read()
+
+tag_pattern = re.compile(r"(<[a-zA-Z0-9\._:]+\s+[^>]*android:key=\"([^\"]+)\"[^>]*(?:/>|</[a-zA-Z0-9\._:]+>))", re.DOTALL)
+mod_items = tag_pattern.findall(mod_content)
+
+logo_tag = None
+other_items = []
+for full_tag, key_name in mod_items:
+    if key_name == "od_logo":
+        logo_tag = full_tag
+    else:
+        other_items.append((full_tag, key_name))
+
+for full_tag, key_name in other_items:
+    item_pattern = re.compile(r"<[a-zA-Z0-9\._:]+\s+[^>]*android:key=\"" + re.escape(key_name) + r"\"[^>]*(?:/>|</[a-zA-Z0-9\._:]+>)", re.DOTALL)
+    if item_pattern.search(target_content):
+        target_content = item_pattern.sub(full_tag, target_content)
+    else:
+        screen_match = re.search(r"(<PreferenceScreen[^>]*>)", target_content, re.DOTALL)
+        if screen_match:
+            open_tag = screen_match.group(1)
+            target_content = target_content.replace(open_tag, open_tag + f"\n    {full_tag}", 1)
+
+if logo_tag:
+    logo_pattern = re.compile(r"\s*<[a-zA-Z0-9\._:]+\s+[^>]*android:key=\"od_logo\"[^>]*(?:/>|</[a-zA-Z0-9\._:]+>)", re.DOTALL)
+    target_content = logo_pattern.sub("", target_content)
+    screen_match = re.search(r"(<PreferenceScreen[^>]*>)", target_content, re.DOTALL)
+    if screen_match:
+        open_tag = screen_match.group(1)
+        target_content = target_content.replace(open_tag, open_tag + f"\n    {logo_tag}", 1)
+
+with open(target_file, "w", encoding="utf-8") as tf:
+    tf.write(target_content)
+' "$target_xml" "$MOD_SOFTWARE_XML"
+        fi
+    fi
+
+    CHOOSE_LOCK_FRAGMENT="$(find "$WORK_TMP/d" -type f -name 'ChooseLockPassword\$ChooseLockPasswordFragment.smali' | sed -n '1p')"
+    if [ -n "${CHOOSE_LOCK_FRAGMENT:-}" ]; then
+        python3 -c '
+import re, sys
+filepath = sys.argv[1]
+with open(filepath, "r", encoding="utf-8") as f:
+    content = f.read()
+
+p1 = re.compile(r"(\.method\s+.*?handleNext\$2\(\)V.*?\.end method)", re.DOTALL)
+content, _ = p1.subn(lambda m: re.subn(r"0x6", "0x4", m.group(1))[0], content)
+
+p2 = re.compile(r"(\.method\s+.*?setAutoPinConfirmOption\(IZ\)V.*?\.end method)", re.DOTALL)
+content, _ = p2.subn(lambda m: re.subn(r"0x6", "0x4", m.group(1))[0], content)
+
+with open(filepath, "w", encoding="utf-8") as f:
+    f.write(content)
+' "$CHOOSE_LOCK_FRAGMENT"
+    fi
+
+    SEC_DEVICE_UTILS="$(find "$WORK_TMP/d" -type f -name 'SecDeviceInfoUtils.smali' | sed -n '1p')"
+    if [ -n "${SEC_DEVICE_UTILS:-}" ]; then
+        python3 -c '
+import re, sys
+filepath = sys.argv[1]
+with open(filepath, "r", encoding="utf-8") as f:
+    content = f.read()
+
+if "sIsImeiRevealed" not in content:
+    content = content.replace(".class", "\n.field public static sIsImeiRevealed:Z\n.class", 1)
+
+pattern = re.compile(r"(\.method.*?getImei\(.*?\).*?\.locals \d+)(.*?)(?=\.end method)", re.DOTALL)
+def patch_sec_imei(match):
+    header, body = match.group(1), match.group(2)
+    if "sIsImeiRevealed" in body:
+        return match.group(0)
+    toggle_logic = """
+    sget-boolean v0, Lcom/samsung/android/settings/deviceinfo/SecDeviceInfoUtils;->sIsImeiRevealed:Z
+    if-nez v0, :cond_real_imei
+    const-string v0, "Tap to view IMEI"
+    return-object v0
+    :cond_real_imei
+"""
+    return header + toggle_logic + body
+
+content, _ = pattern.subn(patch_sec_imei, content)
+with open(filepath, "w", encoding="utf-8") as f:
+    f.write(content)
+' "$SEC_DEVICE_UTILS"
+    fi
+
+    IMEI_INFO_CTRL="$(find "$WORK_TMP/d" -type f -name 'ImeiInfoPreferenceController.smali' | sed -n '1p')"
+    if [ -n "${IMEI_INFO_CTRL:-}" ]; then
+        python3 -c '
+import re, sys
+filepath = sys.argv[1]
+with open(filepath, "r", encoding="utf-8") as f:
+    content = f.read()
+
+tree_click_pattern = re.compile(r"(\.method public handlePreferenceTreeClick\(Landroidx/preference/Preference;\)Z[^\n]*\n\s*\.locals\s+)(\d+)(.*?)(?=\.end method)", re.DOTALL)
+def patch_tree_click(match):
+    prefix, locals_val, body = match.group(1), int(match.group(2)), match.group(3)
+    new_locals = max(locals_val, 2)
+    hook_code = """
+    sget-boolean v0, Lcom/samsung/android/settings/deviceinfo/SecDeviceInfoUtils;->sIsImeiRevealed:Z
+    if-nez v0, :cond_already_revealed
+    const/4 v0, 0x1
+    sput-boolean v0, Lcom/samsung/android/settings/deviceinfo/SecDeviceInfoUtils;->sIsImeiRevealed:Z
+    invoke-virtual {p0, p1}, Lcom/samsung/android/settings/deviceinfo/imei/ImeiInfoPreferenceController;->updateState(Landroidx/preference/Preference;)V
+    const/4 v0, 0x1
+    return v0
+    :cond_already_revealed
+"""
+    return prefix + str(new_locals) + hook_code + body
+
+if tree_click_pattern.search(content):
+    content, _ = tree_click_pattern.subn(patch_tree_click, content)
+else:
+    content += """
+.method public handlePreferenceTreeClick(Landroidx/preference/Preference;)Z
+    .locals 2
+    sget-boolean v0, Lcom/samsung/android/settings/deviceinfo/SecDeviceInfoUtils;->sIsImeiRevealed:Z
+    if-nez v0, :cond_already_revealed
+    const/4 v0, 0x1
+    sput-boolean v0, Lcom/samsung/android/settings/deviceinfo/SecDeviceInfoUtils;->sIsImeiRevealed:Z
+    invoke-virtual {p0, p1}, Lcom/samsung/android/settings/deviceinfo/imei/ImeiInfoPreferenceController;->updateState(Landroidx/preference/Preference;)V
+    const/4 v0, 0x1
+    return v0
+    :cond_already_revealed
+    invoke-super {p0, p1}, Lcom/android/settings/core/BasePreferenceController;->handlePreferenceTreeClick(Landroidx/preference/Preference;)Z
+    move-result v0
+    return v0
+.end method
+"""
+
+with open(filepath, "w", encoding="utf-8") as f:
+    f.write(content)
+' "$IMEI_INFO_CTRL"
+    fi
+
+    _RUN_APKTOOL_QT b -p "$FW_DIR" -o "$OUT_APK" "$WORK_TMP/d"
+    _SIGN_APK_QT "$OUT_APK"
+    cp -f "$OUT_APK" "$INPUT_APK"
+
+    echo "[-] Done patching extracted SecSettings.apk: $INPUT_APK"
+}
+
+PATCH_SEC_SETUPWIZARD() {
+    echo " "
+    echo -e "Patch SecSetupWizard"
+    echo -e "Processing..."
+
+    if [ "$#" -ne 1 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <EXTRACTED_FIRM_DIR>"
+        return 1
+    fi
+
+    local EXTRACTED_FIRM_DIR="$1"
+    local SDK_FULL
+    SDK_FULL="$(GET_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.build.version.sdk_full")"
+
+    case "$SDK_FULL" in
+        33.0|34.0|35.0|36.0|36.1|37.0)
+            echo "- Supported ro.build.version.sdk_full=$SDK_FULL for SetupWizard patch."
+            ;;
+        *)
+            echo "- Unsupported or missing ro.build.version.sdk_full ('${SDK_FULL:-unset}') for SetupWizard patch. Skipping."
+            return 0
+            ;;
+    esac
+
+    local TARGET_DIR="${EXTRACTED_FIRM_DIR}/system/system/priv-app/SecSetupWizard_Global"
+    local INPUT_APK="${TARGET_DIR}/SecSetupWizard_Global.apk"
+    if [ ! -f "$INPUT_APK" ]; then
+        INPUT_APK="$(find "${EXTRACTED_FIRM_DIR}/system" -type f -name 'SecSetupWizard_Global.apk' | sed -n '1p')"
+        if [ -z "${INPUT_APK:-}" ]; then
+            INPUT_APK="$(find "${EXTRACTED_FIRM_DIR}/system" -type f -name 'SecSetupWizard*.apk' | sed -n '1p')"
+        fi
+    fi
+
+    local MOD_DIR="${QT_DIR}/QuantumROM/Mods/setupwizard/SecSetupWizard_Global.apk"
+    local APKTOOL_JAR="${QT_DIR}/bin/java/apktool.jar"
+    local FW_DIR="${QT_DIR}/bin/java/apktool/framework"
+    local SIGNAPK_JAR="${QT_DIR}/bin/signapk/signapk.jar"
+    local SIGNAPK_BIN="${QT_DIR}/bin/signapk/signapk"
+    local CERT_PEM="${QT_DIR}/security/aosp_platform.x509.pem"
+    local KEY_PK8="${QT_DIR}/security/aosp_platform.pk8"
+    local TAG="ONEUI"
+    local BASE_WORK="${WORK_DIR:-${QT_DIR}/work}"
+    local WORK_TMP="${BASE_WORK}/secsetupwizard_tmp"
+    local OUT_APK="${WORK_TMP}/SecSetupWizard_Global_patched.apk"
+
+    if [ -z "${INPUT_APK:-}" ] || [ ! -f "$INPUT_APK" ]; then
+        echo "! Warning: SetupWizard APK not found in ${EXTRACTED_FIRM_DIR}/system. Skipping."
+        return 0
+    fi
+
+    if [ ! -d "$MOD_DIR" ]; then
+        echo "! Warning: SetupWizard mod directory not found at $MOD_DIR. Skipping."
+        return 0
+    fi
+
+    rm -rf "$WORK_TMP"
+    mkdir -p "$WORK_TMP" "$FW_DIR"
+
+    cleanup_suw() {
+        rm -rf "$WORK_TMP"
+    }
+    trap cleanup_suw RETURN
+
+    echo "- Found extracted SetupWizard APK: $INPUT_APK"
+    echo "Decoding SetupWizard..."
+    _RUN_APKTOOL_QT d -f -p "$FW_DIR" -t "$TAG" -o "$WORK_TMP/d" "$INPUT_APK"
+
+    for smali_dir in smali smali_classes2 smali_classes3 smali_classes4 smali_classes5; do
+        if [ -d "$MOD_DIR/$smali_dir" ]; then
+            echo "Copying $smali_dir"
+            mkdir -p "$WORK_TMP/d/$smali_dir"
+            cp -a "$MOD_DIR/$smali_dir/." "$WORK_TMP/d/$smali_dir/"
+        fi
+    done
+
+    for res_dir_path in "$MOD_DIR"/res/*; do
+        if [ -d "$res_dir_path" ]; then
+            res_dir_name=$(basename "$res_dir_path")
+            if [[ "$res_dir_name" != "values"* ]]; then
+                echo "Copying res/$res_dir_name"
+                mkdir -p "$WORK_TMP/d/res/$res_dir_name"
+                cp -a "$res_dir_path/." "$WORK_TMP/d/res/$res_dir_name/"
+            fi
+        fi
+    done
+
+    for f in "$MOD_DIR"/res/values/*.xml; do
+        [ -f "$f" ] || continue
+        n=$(basename "$f")
+        target_xml="$WORK_TMP/d/res/values/$n"
+        if [ -f "$target_xml" ]; then
+            python3 -c '
+import re, sys
+target_file, mod_file = sys.argv[1], sys.argv[2]
+with open(target_file, "r", encoding="utf-8", errors="ignore") as tf:
+    target_content = tf.read()
+with open(mod_file, "r", encoding="utf-8", errors="ignore") as mf:
+    mod_content = mf.read()
+pattern = re.compile(r"(<string\s+name=\"([^\"]+)\"[^>]*>.*?</string>|<string\s+name=\"([^\"]+)\"[^>]*/>)", re.DOTALL)
+mod_items = pattern.findall(mod_content)
+for full_tag, name1, name2 in mod_items:
+    res_name = name1 or name2
+    item_pattern = re.compile(r"<string\s+name=\"" + re.escape(res_name) + r"\"[^>]*>.*?</string>|<string\s+name=\"" + re.escape(res_name) + r"\"[^>]*/>", re.DOTALL)
+    if item_pattern.search(target_content):
+        target_content = item_pattern.sub(full_tag, target_content)
+    else:
+        target_content = target_content.replace("</resources>", f"    {full_tag}\n</resources>")
+with open(target_file, "w", encoding="utf-8") as tf:
+    tf.write(target_content)
+' "$target_xml" "$f"
+        else
+            mkdir -p "$WORK_TMP/d/res/values"
+            cp "$f" "$target_xml"
+        fi
+    done
+
+    for dir in "$MOD_DIR"/res/values-*; do
+        [ ! -d "$dir" ] && continue
+        loc=$(basename "$dir")
+        for val_file in "$dir"/*.xml; do
+            [ -f "$val_file" ] || continue
+            vf_name=$(basename "$val_file")
+            target_xml="$WORK_TMP/d/res/$loc/$vf_name"
+            if [ -f "$target_xml" ]; then
+                python3 -c '
+import re, sys
+target_file, mod_file = sys.argv[1], sys.argv[2]
+with open(target_file, "r", encoding="utf-8", errors="ignore") as tf:
+    target_content = tf.read()
+with open(mod_file, "r", encoding="utf-8", errors="ignore") as mf:
+    mod_content = mf.read()
+pattern = re.compile(r"(<string\s+name=\"([^\"]+)\"[^>]*>.*?</string>|<string\s+name=\"([^\"]+)\"[^>]*/>)", re.DOTALL)
+mod_items = pattern.findall(mod_content)
+for full_tag, name1, name2 in mod_items:
+    res_name = name1 or name2
+    item_pattern = re.compile(r"<string\s+name=\"" + re.escape(res_name) + r"\"[^>]*>.*?</string>|<string\s+name=\"" + re.escape(res_name) + r"\"[^>]*/>", re.DOTALL)
+    if item_pattern.search(target_content):
+        target_content = item_pattern.sub(full_tag, target_content)
+    else:
+        target_content = target_content.replace("</resources>", f"    {full_tag}\n</resources>")
+with open(target_file, "w", encoding="utf-8") as tf:
+    tf.write(target_content)
+' "$target_xml" "$val_file"
+            else
+                mkdir -p "$WORK_TMP/d/res/$loc"
+                cp "$val_file" "$target_xml"
+            fi
+        done
+    done
+
+    if [ -f "$MOD_DIR/AndroidManifest.xml" ]; then
+        tail -n +2 "$MOD_DIR/AndroidManifest.xml" > "$WORK_TMP/manifest_patch"
+        sed -i '/<\/application>/{
+            r '"$WORK_TMP/manifest_patch"'
+            a\<\/application>
+            d
+        }' "$WORK_TMP/d/AndroidManifest.xml"
+    fi
+
+    echo "Applying SetupWizard patches..."
+    local SETUPWIZARD_APK="$WORK_TMP/d"
+
+    set +e
+    NAV_STEP_FILE="$(find "$SETUPWIZARD_APK" -type f -name '*.smali' \
+        -exec grep -lF '"navigationbar_setting"' {} + 2>/dev/null \
+        | grep -v '/com/sec/android/app/SecSetupWizard/SecSetupWizardActivity.smali$' | sed -n '1p')"
+    set -e
+
+    if [ -n "${NAV_STEP_FILE:-}" ]; then
+        NAV_STEP_METHOD="$(awk '/^\.method/{method=$0} /"navigationbar_setting"/{print method; exit}' "$NAV_STEP_FILE" \
+            | sed -E 's/^\.method ([^ ]+ )*//')"
+        python3 -c '
+import sys
+filepath, method_sig, target, rep = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(filepath, "r", encoding="utf-8") as f:
+    lines = f.read().split("\n")
+new_lines, in_m = [], False
+for line in lines:
+    if line.strip().startswith(".method") and method_sig in line:
+        in_m = True
+    elif line.strip() == ".end method":
+        in_m = False
+    if in_m:
+        line = line.replace(target, rep)
+    new_lines.append(line)
+with open(filepath, "w", encoding="utf-8") as f:
+    f.write("\n".join(new_lines))
+' "$NAV_STEP_FILE" "$NAV_STEP_METHOD" "navigationbar_setting" "this_string_does_not_exist"
+    fi
+
+    SETUPWIZARD_ACTIVITY="smali/com/sec/android/app/SecSetupWizard/SecSetupWizardActivity.smali"
+    if [ -f "$SETUPWIZARD_APK/$SETUPWIZARD_ACTIVITY" ]; then
+        SETUPWIZARD_ACTIVITY_METHOD="$(awk '/^\.method/{method=$0} /"navigationbar_setting"/{print method; exit}' \
+            "$SETUPWIZARD_APK/$SETUPWIZARD_ACTIVITY" | sed -E 's/^\.method ([^ ]+ )*//')"
+        python3 -c '
+import sys
+filepath, method_sig, target, rep = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(filepath, "r", encoding="utf-8") as f:
+    lines = f.read().split("\n")
+new_lines, in_m = [], False
+for line in lines:
+    if line.strip().startswith(".method") and method_sig in line:
+        in_m = True
+    elif line.strip() == ".end method":
+        in_m = False
+    if in_m:
+        line = line.replace(target, rep)
+    new_lines.append(line)
+with open(filepath, "w", encoding="utf-8") as f:
+    f.write("\n".join(new_lines))
+' "$SETUPWIZARD_APK/$SETUPWIZARD_ACTIVITY" "$SETUPWIZARD_ACTIVITY_METHOD" "navigationbar_setting" "this_string_does_not_exist"
+    fi
+
+    if [ -f "$WORK_TMP/d/res/values/arrays.xml" ]; then
+        sed -i "/omcagent/d" "$WORK_TMP/d/res/values/arrays.xml"
+    fi
+
+    local SETUPWIZARD_PUBLIC="$SETUPWIZARD_APK/res/values/public.xml"
+    if [ -f "$SETUPWIZARD_PUBLIC" ]; then
+        if ! grep -q 'name="suw_ic_unica"' "$SETUPWIZARD_PUBLIC"; then
+            LAST_DRAWABLE_ID="$(grep '<public type="drawable"' "$SETUPWIZARD_PUBLIC" \
+                | tail -n 1 | sed -n 's/.* id="\(0x[0-9a-fA-F]*\)".*/\1/p')"
+            DISCLAIMER_ICON_ID="$(printf '0x%08x' "$((LAST_DRAWABLE_ID + 1))")"
+            awk -v entry="    <public type=\"drawable\" name=\"suw_ic_unica\" id=\"$DISCLAIMER_ICON_ID\" />" '
+                !inserted && /<public type="id"/ { print entry; inserted = 1 }
+                { print }
+            ' "$SETUPWIZARD_PUBLIC" > "$SETUPWIZARD_PUBLIC.tmp"
+            mv "$SETUPWIZARD_PUBLIC.tmp" "$SETUPWIZARD_PUBLIC"
+        else
+            DISCLAIMER_ICON_ID="$(sed -n 's/.*name="suw_ic_unica" id="\(0x[0-9a-fA-F]*\)".*/\1/p' "$SETUPWIZARD_PUBLIC")"
+        fi
+
+        if ! grep -q 'name="disclaimer_unica_description"' "$SETUPWIZARD_PUBLIC"; then
+            LAST_STRING_ID="$(grep '<public type="string"' "$SETUPWIZARD_PUBLIC" \
+                | tail -n 1 | sed -n 's/.* id="\(0x[0-9a-fA-F]*\)".*/\1/p')"
+            DISCLAIMER_STRING_ID="$(printf '0x%08x' "$((LAST_STRING_ID + 1))")"
+            awk -v entry="    <public type=\"string\" name=\"disclaimer_unica_description\" id=\"$DISCLAIMER_STRING_ID\" />" '
+                !inserted && /<public type="style"/ { print entry; inserted = 1 }
+                { print }
+            ' "$SETUPWIZARD_PUBLIC" > "$SETUPWIZARD_PUBLIC.tmp"
+            mv "$SETUPWIZARD_PUBLIC.tmp" "$SETUPWIZARD_PUBLIC"
+        else
+            DISCLAIMER_STRING_ID="$(sed -n 's/.*name="disclaimer_unica_description" id="\(0x[0-9a-fA-F]*\)".*/\1/p' "$SETUPWIZARD_PUBLIC")"
+        fi
+
+        set +e
+        DISCLAIMER_STEP_FILE="$(find "$SETUPWIZARD_APK" -type f -name '*.smali' \
+            -exec grep -lF '"disclaimer"' {} + 2>/dev/null | sed -n '1p')"
+        set -e
+
+        if [ -n "${DISCLAIMER_STEP_FILE:-}" ]; then
+            DISCLAIMER_STEP_METHOD="$(awk '/^\.method/{method=$0} /"disclaimer"/{print method; exit}' \
+                "$DISCLAIMER_STEP_FILE" | sed -E 's/^\.method ([^ ]+ )*//')"
+            python3 -c '
+import sys
+filepath, method_sig, target, rep = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(filepath, "r", encoding="utf-8") as f:
+    lines = f.read().split("\n")
+new_lines, in_m = [], False
+for line in lines:
+    if line.strip().startswith(".method") and method_sig in line:
+        in_m = True
+    elif line.strip() == ".end method":
+        in_m = False
+    if in_m:
+        line = line.replace(target, rep)
+    new_lines.append(line)
+with open(filepath, "w", encoding="utf-8") as f:
+    f.write("\n".join(new_lines))
+' "$DISCLAIMER_STEP_FILE" "$DISCLAIMER_STEP_METHOD" "disclaimer" "this_string_does_not_exist"
+        fi
+
+        DISCLAIMER_ACTIVITY="$(find "$SETUPWIZARD_APK" -type f -name 'DisclaimerActivity.smali' | sed -n '1p')"
+        if [ -n "${DISCLAIMER_ACTIVITY:-}" ] && [ -f "$DISCLAIMER_ACTIVITY" ]; then
+            DISCLAIMER_BASE_CLASS="$(sed -n 's/^\.super //p' "$DISCLAIMER_ACTIVITY" | sed -n '1p')"
+            DISCLAIMER_BASE_SMALI="$SETUPWIZARD_APK/smali/${DISCLAIMER_BASE_CLASS#L}"
+            DISCLAIMER_BASE_SMALI="${DISCLAIMER_BASE_SMALI%;}.smali"
+            DISCLAIMER_ICON_METHOD="$(sed -n -E 's/^\.method .* ([^ ]+)\(Landroid\/graphics\/drawable\/Drawable;\)V$/\1/p' \
+                "$DISCLAIMER_BASE_SMALI" | sed -n '1p')"
+
+            if [ -n "${DISCLAIMER_ICON_METHOD:-}" ]; then
+                awk -v icon_id="$DISCLAIMER_ICON_ID" -v string_id="$DISCLAIMER_STRING_ID" \
+                    -v base_class="$DISCLAIMER_BASE_CLASS" -v icon_method="$DISCLAIMER_ICON_METHOD" '
+                    /^\.method .* onCreate\(Landroid\/os\/Bundle;\)V$/ { in_on_create = 1 }
+                    in_on_create && !icon_added && /->setContentView\(I\)V$/ {
+                        print
+                        print ""
+                        print "    const p1, " icon_id
+                        print ""
+                        print "    invoke-virtual {p0, p1}, Landroid/content/Context;->getDrawable(I)Landroid/graphics/drawable/Drawable;"
+                        print ""
+                        print "    move-result-object p1"
+                        print ""
+                        print "    invoke-virtual {p0, p1}, " base_class "->" icon_method "(Landroid/graphics/drawable/Drawable;)V"
+                        icon_added = 1
+                        next
+                    }
+                    in_on_create && /check-cast p1, Landroid\/widget\/TextView;/ {
+                        print
+                        print ""
+                        print "    const v0, " string_id
+                        print ""
+                        print "    invoke-virtual {p0, v0}, Landroid/content/Context;->getString(I)Ljava/lang/String;"
+                        print ""
+                        print "    move-result-object p0"
+                        print ""
+                        print "    invoke-virtual {p1, p0}, Landroid/widget/TextView;->setText(Ljava/lang/CharSequence;)V"
+                        print ""
+                        print "    return-void"
+                        replace_tail = 1
+                        next
+                    }
+                    replace_tail && /^\.end method$/ {
+                        print
+                        replace_tail = 0
+                        in_on_create = 0
+                        next
+                    }
+                    replace_tail { next }
+                    { print }
+                ' "$DISCLAIMER_ACTIVITY" > "$DISCLAIMER_ACTIVITY.tmp"
+                mv "$DISCLAIMER_ACTIVITY.tmp" "$DISCLAIMER_ACTIVITY"
+            fi
+        fi
+    fi
+
+    echo "Rebuilding SetupWizard APK..."
+    _RUN_APKTOOL_QT b -p "$FW_DIR" -o "$OUT_APK" "$WORK_TMP/d"
+    _SIGN_APK_QT "$OUT_APK"
+    cp -f "$OUT_APK" "$INPUT_APK"
+
+    echo "Done patching extracted SetupWizard APK: $INPUT_APK"
+}
 
 PATCH_APK_SHARED_USER_ID_VERIFICATION() {
     echo " "
@@ -1559,6 +2276,99 @@ PATCH_SELINUX() {
     fi
 }
 
+PATCH_32BIT_HALS() {
+    echo " "
+    echo -e "Patch 32-Bit HALs"
+    echo -e "Authors: Dai-doz"
+    echo -e "Processing..."
+
+    if [ "$#" -ne 1 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <EXTRACTED_FIRM_DIR>"
+        return 1
+    fi
+
+    local EXTRACTED_FIRM_DIR="$1"
+    local SYS_PROP_FILE=""
+
+    # Support both system-as-root (system/system/build.prop) and system/build.prop layouts
+    if [ -f "${EXTRACTED_FIRM_DIR}/system/system/build.prop" ]; then
+        SYS_PROP_FILE="${EXTRACTED_FIRM_DIR}/system/system/build.prop"
+    elif [ -f "${EXTRACTED_FIRM_DIR}/system/build.prop" ]; then
+        SYS_PROP_FILE="${EXTRACTED_FIRM_DIR}/system/build.prop"
+    else
+        echo -e "! Error: Could not find system build.prop in ${EXTRACTED_FIRM_DIR}/system"
+        return 1
+    fi
+
+    local SDK_FULL
+    SDK_FULL="$(grep -E '^ro\.build\.version\.sdk_full=' "$SYS_PROP_FILE" | head -n 1 | cut -d'=' -f2- | tr -d '[:space:]')"
+
+    local PREBUILT_DEVICE=""
+    local DEVICE_LABEL=""
+
+    case "$SDK_FULL" in
+        "37.0")
+            PREBUILT_DEVICE="a57nsxx"
+            DEVICE_LABEL="A57n (a57nsxx)"
+            ;;
+        "36.1")
+            PREBUILT_DEVICE="r11sxxx"
+            DEVICE_LABEL="S23 FE (r11sxxx)"
+            ;;
+        *)
+            echo -e "! Error: Unsupported or missing ro.build.version.sdk_full ('${SDK_FULL:-unset}')"
+            return 1
+            ;;
+    esac
+
+    local PREBUILT_DIR="${QT_DIR}/prebuilts/${PREBUILT_DEVICE}"
+    if [ ! -d "$PREBUILT_DIR" ]; then
+        echo -e "! Error: Prebuilts directory not found: ${PREBUILT_DIR}"
+        return 1
+    fi
+
+    echo -e "- Detected ro.build.version.sdk_full=${SDK_FULL} -> using ${DEVICE_LABEL} prebuilts"
+
+    echo -e "- Adding ${DEVICE_LABEL} lib/ blobs"
+    if [ -d "${PREBUILT_DIR}/system/lib" ]; then
+        rm -rf "${EXTRACTED_FIRM_DIR}/system/system/lib"
+        mkdir -p "${EXTRACTED_FIRM_DIR}/system/system/lib"
+        cp -rfa "${PREBUILT_DIR}/system/lib/." "${EXTRACTED_FIRM_DIR}/system/system/lib/"
+    fi
+
+    local BLOBS_LIST="
+    system/apex/com.android.i18n.apex
+    system/apex/com.android.runtime.apex
+    system/apex/com.google.android.tzdata6.apex
+    system/bin/bootstrap/linker
+    system/bin/bootstrap/linker_asan
+    "
+
+    for blob in $BLOBS_LIST; do
+        if [ -f "${PREBUILT_DIR}/$blob" ]; then
+            mkdir -p "$(dirname "${EXTRACTED_FIRM_DIR}/system/$blob")"
+            cp -fa "${PREBUILT_DIR}/$blob" "${EXTRACTED_FIRM_DIR}/system/$blob"
+        fi
+    done
+
+    echo -e "- Creating symlinks"
+    ln -sf "/apex/com.android.runtime/bin/linker" "${EXTRACTED_FIRM_DIR}/system/system/bin/linker"
+    ln -sf "/apex/com.android.runtime/bin/linker" "${EXTRACTED_FIRM_DIR}/system/system/bin/linker_asan"
+
+    ln -sf "/apex/com.android.runtime/lib/bionic/libc.so" "${EXTRACTED_FIRM_DIR}/system/system/lib/libc.so"
+    ln -sf "/apex/com.android.runtime/lib/bionic/libdl.so" "${EXTRACTED_FIRM_DIR}/system/system/lib/libdl.so"
+    ln -sf "/apex/com.android.runtime/lib/bionic/libdl_android.so" "${EXTRACTED_FIRM_DIR}/system/system/lib/libdl_android.so"
+    ln -sf "/apex/com.android.runtime/lib/bionic/libm.so" "${EXTRACTED_FIRM_DIR}/system/system/lib/libm.so"
+
+    echo -e "- Setting props"
+    BUILD_PROP "$EXTRACTED_FIRM_DIR" "vendor" "ro.vendor.product.cpu.abilist" "arm64-v8a"
+    BUILD_PROP "$EXTRACTED_FIRM_DIR" "vendor" "ro.vendor.product.cpu.abilist32" ""
+    BUILD_PROP "$EXTRACTED_FIRM_DIR" "vendor" "ro.vendor.product.cpu.abilist64" "arm64-v8a"
+    BUILD_PROP "$EXTRACTED_FIRM_DIR" "vendor" "ro.zygote" "zygote64"
+    BUILD_PROP "$EXTRACTED_FIRM_DIR" "vendor" "dalvik.vm.dex2oat64.enabled" "true"
+
+    echo -e "Patch done"
+}
 
 UPDATE_FLOATING_FEATURE() {
     if [ "$#" -ne 3 ]; then
@@ -2571,6 +3381,39 @@ APPLY_CUSTOM_FEATURES() {
 	BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.telephony.sim_slots.count" "2"
 	BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.surface_flinger.protected_contents" "true"
 	BUILD_PROP "$EXTRACTED_FIRM_DIR" "product" "ro.product.locale" "en-US"
+
+    if [ -d "$(pwd)/OTA/system" ]; then
+        echo -e "Patch FOTA update switch to LOS init "
+        echo -e "Authors: tui2019 / Dai-doz / LineageOS contributors"
+        echo -e "Processing..."
+        echo -e "- Integrating LineageOS OTA Updater and Keystore..."
+        mkdir -p "${EXTRACTED_FIRM_DIR}/system/system/priv-app/Updater"
+        mkdir -p "${EXTRACTED_FIRM_DIR}/system/system/priv-app/com.wssyncmldm"
+        mkdir -p "${EXTRACTED_FIRM_DIR}/system/system/etc/permissions"
+        mkdir -p "${EXTRACTED_FIRM_DIR}/system/system/etc/sysconfig"
+        mkdir -p "${EXTRACTED_FIRM_DIR}/system/system/etc/security"
+        mkdir -p "${EXTRACTED_FIRM_DIR}/system/system/etc/init/hw"
+        cp -rfa "$(pwd)/OTA/system/." "${EXTRACTED_FIRM_DIR}/system/system/"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "lineage.updater.uri" "https://raw.githubusercontent.com/Dai-doz/Suantum-Qex/UG-Suantum-Qex/platform/{$STOCK_DEVICE}/{$STOCK_DEVICE}.json"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.lineage.device" "{$STOCK_DEVICE}"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.lineage.build.version" "3.5.3"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.lineage.releasetype" "Official"
+
+        echo -e "- Check date and sign into LineageOS OTA Updater..."
+        # Synchronize build date and UTC timestamp for OTA updater and system info
+        local BUILD_UTC="${BUILD_DATETIME_UTC:-$(date +%s)}"
+        local BUILD_DATE="$(date)"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.build.date.utc" "$BUILD_UTC"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.build.date" "$BUILD_DATE"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.system.build.date.utc" "$BUILD_UTC"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.system.build.date" "$BUILD_DATE"
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system_ext" "ro.system_ext.build.date.utc" "$BUILD_UTC" 2>/dev/null || true
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "system_ext" "ro.system_ext.build.date" "$BUILD_DATE" 2>/dev/null || true
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "product" "ro.product.build.date.utc" "$BUILD_UTC" 2>/dev/null || true
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "product" "ro.product.build.date" "$BUILD_DATE" 2>/dev/null || true
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "product" "ro.build.date.utc" "$BUILD_UTC" 2>/dev/null || true
+        BUILD_PROP "$EXTRACTED_FIRM_DIR" "product" "ro.build.date" "$BUILD_DATE" 2>/dev/null || true
+    fi
 
     # Apply custom floating feature.
 	APPLY_CUSTOM_FLOATING_FEATURE "$EXTRACTED_FIRM_DIR"
