@@ -3845,14 +3845,19 @@ BUILD_SUPER_IMG() {
 
         local name="$(basename "$img")"
 
-        case "$name" in
-            boot.img|init_boot.img|recovery.img|vbmeta.img|vbmeta_system.img|vbmeta_vendor.img|dtbo.img|userdata.img|cache.img|metadata.img|vendor_boot.img|super.img)
-                echo "- Skipping $name"
+        local part_name="${name%.img}"
+
+        # Only real logical partitions go into super. Anything else in the folder
+        # (kernel/boot images from device extras, vbmeta, dtbo...) stays out and is shipped as-is.
+        case "$part_name" in
+            system|system_ext|system_other|system_dlkm|product|vendor|vendor_dlkm|odm|odm_dlkm|prism|optics)
+                ;;
+            *)
+                echo "- Not a logical partition, leaving out of super: $name"
                 continue
                 ;;
         esac
 
-        local part_name="${name%.img}"
         local size=$(stat -c%s "$img")
 
         [ "$size" -le 0 ] && {
