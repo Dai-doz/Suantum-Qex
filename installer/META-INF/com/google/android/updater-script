@@ -7,11 +7,6 @@ ui_print " ██║     ██████╔╝╚██████╔╝█�
 ui_print " ╚═╝     ╚═════╝  ╚═════╝ ╚══════╝ ╚═════╝ ";
 ui_print "==========================================";
 
-# ── 1. Flash boot.img ─────────────────────────────────────────────────────────
-ui_print("Flashing Kernel...");
-package_extract_file("boot.img", "/dev/block/by-name/boot");
-set_progress(0.200000);
-
 
 # ── 3. Flash super.img ────────────────────────────────────────────────────────
 ui_print("Flashing ROM...");
@@ -20,7 +15,7 @@ set_progress(0.950000);
 
 ui_print(" ");
 ui_print("============================================");
-ui_print("  ProjectDozG Flashed Successfully!");
-ui_print("  Please reboot your phone.");
+ui_print("  ProjectDozG Unofficial Flashed Successfully!");
+ui_print("  Please reboot your phone and flash kernel manually.");
 ui_print("============================================");
 ui_print(" ");

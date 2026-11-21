@@ -3812,8 +3812,13 @@ BUILD_IMG() {
 BUILD_SUPER_IMG() {
     echo " "
 
+    # Usage: BUILD_SUPER_IMG <IMG_DIR> <OUTPUT_DIR> [SUPER_PARTITION_SIZE_BYTES] [METADATA_SLOTS]
+    # SUPER_PARTITION_SIZE_BYTES must match the real super partition of the device.
+    # If omitted, the image is sized to its content (fine for testing, NOT guaranteed to boot).
     local IMG_DIR="$1"
     local OUTPUT_DIR="$2"
+    local SUPER_SIZE="${3:-}"
+    local METADATA_SLOTS="${4:-2}"
     local OUTPUT_IMG="$OUTPUT_DIR/super.img"
 
     echo "Building: super.img"
@@ -3823,10 +3828,15 @@ BUILD_SUPER_IMG() {
         return 1
     }
 
+    mkdir -p "$OUTPUT_DIR"
+
     local PARTITIONS=""
     local IMAGES=""
     local TOTAL_SIZE=0
     local VALID_IMAGES=0
+
+    # Global: images that went into super.img, so the caller can drop them afterwards.
+    SUPER_PACKED_IMAGES=()
 
     rm -f "$OUTPUT_IMG"
 
@@ -3850,10 +3860,18 @@ BUILD_SUPER_IMG() {
             continue
         }
 
+        # lpmake needs raw images
+        if [ "$(DETECT_FILESYSTEM "$img")" = "sparse" ]; then
+            echo "- $name is sparse, converting to raw"
+            simg2img "$img" "$img.raw" && mv -f "$img.raw" "$img" || { echo "- Failed to convert $name"; return 1; }
+            size=$(stat -c%s "$img")
+        fi
+
         echo "Adding: $part_name ($size bytes)"
 
         PARTITIONS+=" --partition ${part_name}:readonly:${size}:main"
         IMAGES+=" --image ${part_name}=$img"
+        SUPER_PACKED_IMAGES+=("$img")
         TOTAL_SIZE=$((TOTAL_SIZE + size))
         VALID_IMAGES=1
     done
@@ -3863,17 +3881,157 @@ BUILD_SUPER_IMG() {
         return 1
     }
 
-    TOTAL_SIZE=$((TOTAL_SIZE + 4194304))
+    local GROUP_SIZE=$((TOTAL_SIZE + 4194304))
+    local DEVICE_SIZE="$GROUP_SIZE"
+
+    if [ -n "$SUPER_SIZE" ]; then
+        DEVICE_SIZE="$SUPER_SIZE"
+        # leave room for the lp metadata
+        GROUP_SIZE=$((SUPER_SIZE - 4194304))
+
+        if [ "$TOTAL_SIZE" -gt "$GROUP_SIZE" ]; then
+            echo "- ERROR: images ($TOTAL_SIZE bytes) do not fit in super partition ($SUPER_SIZE bytes)."
+            return 1
+        fi
+    else
+        echo "- WARNING: no super partition size given, sizing to content. Set it to the device's real super size."
+    fi
 
     $lpmake \
-	    --device super:$TOTAL_SIZE \
+        --device super:$DEVICE_SIZE \
         --metadata-size 65536 \
-        --metadata-slots 2 \
-		--group main:$TOTAL_SIZE \
-		--block-size 4096 \
+        --metadata-slots "$METADATA_SLOTS" \
+        --group main:$GROUP_SIZE \
+        --block-size 4096 \
         $PARTITIONS \
         $IMAGES \
         --output "$OUTPUT_IMG"
+}
+
+
+# Builds super.img from every logical partition image in OUT_DIR, then deletes those images.
+PACK_SUPER_IMG() {
+    if [ "$#" -lt 1 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <OUT_DIR> [SUPER_SIZE_BYTES] [METADATA_SLOTS]"
+        return 1
+    fi
+
+    local OUT="$1"
+
+    BUILD_SUPER_IMG "$OUT" "$OUT" "${2:-}" "${3:-2}" || return 1
+
+    if [ ! -s "$OUT/super.img" ]; then
+        echo "- super.img was not created"
+        return 1
+    fi
+
+    for img in "${SUPER_PACKED_IMAGES[@]}"; do
+        rm -f "$img"
+    done
+
+    echo "- super.img created: $(du -m "$OUT/super.img" | awk '{print $1}') MB"
+}
+
+
+GET_DEVICE_CONFIG() {
+    if [ "$#" -ne 2 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <STOCK_DEVICE> <KEY>"
+        return 1
+    fi
+
+    local CONFIG="${DEVICES_DIR}/$1/config"
+
+    [ -f "$CONFIG" ] || return 0
+    grep -m1 "^${2}=" "$CONFIG" | cut -d= -f2- | tr -d '\r"'"'"
+}
+
+
+# SM-A127F only: download the prebuilt 5.10 or 4.19 vendor.img and odm.img into OUT_DIR.
+FETCH_A127F_VENDOR_ODM() {
+    echo " "
+
+    if [ "$#" -ne 3 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <STOCK_DEVICE> <5.10|4.19> <OUT_DIR>"
+        return 1
+    fi
+
+    local DEVICE="$1"
+    local KERNEL="$2"
+    local OUT="$3"
+
+    if [ "$DEVICE" != "SM-A127F" ]; then
+        echo "- Kernel vendor/odm option is only for SM-A127F (stock device: $DEVICE). Skipping."
+        return 0
+    fi
+
+    case "$KERNEL" in
+        5.10|4.19) ;;
+        none|"")
+            echo "- No kernel vendor/odm selected. Skipping."
+            return 0
+            ;;
+        *)
+            echo "- Unsupported kernel option: $KERNEL"
+            return 1
+            ;;
+    esac
+
+    local BASE="https://github.com/Dai-doz/Suantum-Qex/releases/download/${KERNEL}-vendor"
+
+    echo "Adding SM-A127F $KERNEL vendor and odm."
+    mkdir -p "$OUT"
+
+    for part in vendor odm; do
+        WGET_DOWNLOAD "${BASE}/${part}.img" "$OUT" || return 1
+
+        if [ ! -s "$OUT/${part}.img" ]; then
+            echo "- ${part}.img download is empty"
+            return 1
+        fi
+
+        # BUILD_SUPER_IMG / lpmake needs raw images
+        if [ "$(DETECT_FILESYSTEM "$OUT/${part}.img")" = "sparse" ]; then
+            echo "- ${part}.img is sparse, converting to raw"
+            simg2img "$OUT/${part}.img" "$OUT/${part}.img.raw" && mv -f "$OUT/${part}.img.raw" "$OUT/${part}.img" || return 1
+        fi
+    done
+}
+
+
+# Flashable zip = everything in INSTALLER_DIR (META-INF etc.) + the built images from OUT_DIR.
+MAKE_FLASHABLE_ZIP() {
+    echo " "
+
+    if [ "$#" -ne 3 ]; then
+        echo -e "Usage: ${FUNCNAME[0]} <OUT_DIR> <INSTALLER_DIR> <ZIP_PATH>"
+        return 1
+    fi
+
+    local OUT="$1"
+    local INSTALLER_DIR="$2"
+    local ZIP="$3"
+    local ZIP_NAME="$(basename "$ZIP")"
+
+    if [ ! -d "$INSTALLER_DIR/META-INF" ]; then
+        echo "- ERROR: no installer found at $INSTALLER_DIR (expected $INSTALLER_DIR/META-INF/...)"
+        return 1
+    fi
+
+    local STAGE="${WORK_DIR:-${QT_DIR}/WORK}/zip_stage"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
+
+    echo "- Adding installer from $INSTALLER_DIR"
+    cp -a "$INSTALLER_DIR/." "$STAGE/"
+
+    # move (not copy) the images, they can be several GB
+    find "$OUT" -mindepth 1 -maxdepth 1 ! -name "$ZIP_NAME" -exec mv -f {} "$STAGE/" \;
+
+    rm -f "$ZIP"
+    echo "Creating flashable zip: $ZIP_NAME"
+    (cd "$STAGE" && 7z a -tzip -mx=5 "$ZIP" ./*) || { echo "- Failed to create zip"; return 1; }
+
+    rm -rf "$STAGE"
 }
 
 
