@@ -243,11 +243,17 @@ jobs:
         if: steps.disk.outputs.enough == 'false'
         uses: rokibhasansagar/slimhub_actions@v25.42.5
 
+      - name: Set up Java 25 (signapk.jar needs class version 68+)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
       - name: Install Dependencies.
         run: |
           sudo apt update
           sudo apt install -y p7zip-full lz4 liblz4-1 liblz4-dev libzstd1 libzstd-dev build-essential android-sdk-libsparse-utils linux-modules-extra-$(uname -r) \
-              f2fs-tools fuse2fs fuse e2fsprogs python3 python3-pip zipalign unzip openjdk-21-jdk jq perl xxd kmod erofs-utils curl wget brotli pv bc
+              f2fs-tools fuse2fs fuse e2fsprogs python3 python3-pip zipalign unzip jq perl xxd kmod erofs-utils curl wget brotli pv bc
           sudo modprobe f2fs || true
           [ -d GoFileDownloader ] || git clone https://github.com/SN-Abdullah-Al-Noman/GoFileDownloader.git
           pip install -r GoFileDownloader/requirements.txt

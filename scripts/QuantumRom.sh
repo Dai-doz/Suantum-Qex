@@ -970,15 +970,17 @@ _SIGN_APK_QT() {
         return 0
     fi
 
-    if [ -x "$SIGNAPK_BIN" ] || [ -f "$SIGNAPK_BIN" ]; then
-        "$SIGNAPK_BIN" "$CERT_PEM" "$KEY_PK8" "$APK_PATH" "$SIGNED_TMP"
-        mv -f "$SIGNED_TMP" "$APK_PATH"
+    if [ -f "$SIGNAPK_BIN" ]; then
+        chmod +x "$SIGNAPK_BIN" 2>/dev/null
+        "$SIGNAPK_BIN" "$CERT_PEM" "$KEY_PK8" "$APK_PATH" "$SIGNED_TMP" || { echo "! Error: signapk failed"; rm -f "$SIGNED_TMP"; return 1; }
     elif [ -f "$SIGNAPK_JAR" ]; then
-        java -jar "$SIGNAPK_JAR" "$CERT_PEM" "$KEY_PK8" "$APK_PATH" "$SIGNED_TMP"
-        mv -f "$SIGNED_TMP" "$APK_PATH"
+        java -jar "$SIGNAPK_JAR" "$CERT_PEM" "$KEY_PK8" "$APK_PATH" "$SIGNED_TMP" || { echo "! Error: signapk failed (check java version: $(java -version 2>&1 | head -n1))"; rm -f "$SIGNED_TMP"; return 1; }
     else
         echo "! Warning: signapk not found at $SIGNAPK_BIN or $SIGNAPK_JAR, skipping sign."
+        return 0
     fi
+
+    mv -f "$SIGNED_TMP" "$APK_PATH"
 }
 
 PATCH_SEC_SETTINGS() {
@@ -1316,7 +1318,7 @@ with open(filepath, "w", encoding="utf-8") as f:
     fi
 
     _RUN_APKTOOL_QT b -p "$FW_DIR" -o "$OUT_APK" "$WORK_TMP/d"
-    _SIGN_APK_QT "$OUT_APK"
+    _SIGN_APK_QT "$OUT_APK" || { rm -rf "$WORK_TMP"; return 1; }
     cp -f "$OUT_APK" "$INPUT_APK"
 
     rm -rf "$WORK_TMP"
@@ -1644,7 +1646,7 @@ with open(filepath, "w", encoding="utf-8") as f:
 
     echo "Rebuilding SetupWizard APK..."
     _RUN_APKTOOL_QT b -p "$FW_DIR" -o "$OUT_APK" "$WORK_TMP/d"
-    _SIGN_APK_QT "$OUT_APK"
+    _SIGN_APK_QT "$OUT_APK" || { rm -rf "$WORK_TMP"; return 1; }
     cp -f "$OUT_APK" "$INPUT_APK"
 
     rm -rf "$WORK_TMP"
